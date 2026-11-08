@@ -14,7 +14,12 @@ import pytest
 from console_window.backend import HeadlessBackend
 
 from pypi_cleanup_tui import tui as tui_mod
-from pypi_cleanup_tui.main import CleanupTui, Release
+from pypi_cleanup_tui.main import (
+    SORT_BY_DATE,
+    SORT_BY_VERSION,
+    CleanupTui,
+    Release,
+)
 
 NOW = datetime(2024, 5, 1, 12, 0, tzinfo=timezone.utc)
 EDT = timezone(timedelta(hours=-4), 'EDT')
@@ -50,6 +55,16 @@ def _cleanup3():
     return cleanup
 
 
+def _mixed():
+    """Version order and upload order disagree: 2.0 is the older upload."""
+    cleanup = CleanupTui('demo', user='alice')
+    cleanup.versions = [
+        Release('2.0', NOW - timedelta(days=10)),
+        Release('1.1', NOW),
+    ]
+    return cleanup
+
+
 def _app(cleanup=None, rows=20, cols=100):
     return tui_mod.CleanupApp(
         cleanup or _cleanup(),
@@ -73,8 +88,26 @@ def _press(app, key):
 # --- row formatting -------------------------------------------------------
 
 def test_column_header_names_each_column_in_utc():
+    # The default sort is by version, so VERSION carries the star.
     assert tui_mod.column_header().split() == [
-        'DEL', 'DATE', '(UTC)', 'DAYS', 'VERSION']
+        'DEL', 'DATE', '(UTC)', 'DAYS', '*VERSION']
+
+
+def test_column_header_stars_the_sorted_column():
+    by_date = tui_mod.column_header(sort=SORT_BY_DATE)
+    by_version = tui_mod.column_header(sort=SORT_BY_VERSION)
+
+    assert '*DATE (UTC)' in by_date
+    assert '*VERSION' not in by_date
+    assert '*VERSION' in by_version
+    assert '*DATE' not in by_version
+
+
+def test_the_sort_star_does_not_move_the_days_column():
+    by_date = tui_mod.column_header(sort=SORT_BY_DATE)
+    by_version = tui_mod.column_header(sort=SORT_BY_VERSION)
+
+    assert by_date.index('DAYS') == by_version.index('DAYS') == 22
 
 
 def test_column_header_names_the_zone_in_force():
@@ -136,11 +169,15 @@ def test_main_screen_draws_three_header_lines_and_one_row_per_release():
 
         assert app.win.head.row_cnt == 3
         assert app.win.head.texts[0] == (
-            'q:quit ?:help x:mark X:mark-all u:unmark U:unmark-all D:zone')
+            f'x:mark X:mark{tui_mod.DOWN_MARK} unmark '
+            f'Unmark{tui_mod.DOWN_MARK} zone quit ?:help')
         assert 'User: alice' in app.win.head.texts[1]
         assert 'Project: demo' in app.win.head.texts[1]
         assert 'Index: pypi.org' in app.win.head.texts[1]
         assert 'Times' not in app.win.head.texts[1]
+        assert 'Sort' not in app.win.head.texts[1]
+        assert 'Releases' not in app.win.head.texts[1]
+        assert 's - ' not in app.win.head.texts[0]
 
         # The column titles are the third header line, dim and not underlined.
         assert app.win.head.texts[2] == tui_mod.column_header()
@@ -164,6 +201,22 @@ def test_main_screen_marks_a_release_selected_for_deletion():
         app.screens[tui_mod.MAIN_ST].draw_screen()
 
         assert app.win.body.texts[0].lstrip().startswith(tui_mod.DEL_MARK)
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_del_hint_leads_the_line_only_while_something_is_marked():
+    cleanup = _cleanup3()
+    app = _app(cleanup)
+    try:
+        _draw(app)
+        assert not app.win.head.texts[0].startswith('del ')
+
+        cleanup.versions[0].delete = True
+        app.win.clear()
+        _draw(app)
+
+        assert app.win.head.texts[0].startswith('del ')
     finally:
         app.win.stop_curses()
 
@@ -360,35 +413,100 @@ def test_rows_stay_uncoloured_while_nothing_is_marked(monkeypatch):
         app.win.stop_curses()
 
 
-# --- the D spinner --------------------------------------------------------
+# --- the z spinner --------------------------------------------------------
 
-def test_d_cycles_the_date_column_between_utc_and_local():
+def test_z_cycles_the_date_column_between_utc_and_local():
     app = _app(_cleanup3())
     try:
         _draw(app)
+        assert ord('z') in app.spin.keys
         assert app.spin.get_value('time_zone') == tui_mod.UTC_MODE
         assert app.win.head.texts[2] == tui_mod.column_header()
 
-        _press(app, ord('D'))
+        _press(app, ord('z'))
         assert app.spin.get_value('time_zone') == tui_mod.LOCAL_MODE
 
-        _press(app, ord('D'))
+        _press(app, ord('z'))
         assert app.spin.get_value('time_zone') == tui_mod.UTC_MODE
     finally:
         app.win.stop_curses()
 
 
-def test_the_date_title_names_the_local_zone_after_d():
+def test_the_date_title_names_the_local_zone_after_z():
     app = _app(_cleanup3())
     try:
         _draw(app)
-        _press(app, ord('D'))
+        _press(app, ord('z'))
 
         app.win.clear()
         _draw(app)
 
         local = datetime.now().astimezone().tzname() or tui_mod.LOCAL_MODE
         assert f'DATE ({local})' in app.win.head.texts[2]
+    finally:
+        app.win.stop_curses()
+
+
+# --- the d placeholder ----------------------------------------------------
+
+def test_d_flashes_the_pending_deletion_count(monkeypatch):
+    cleanup = _cleanup3()
+    cleanup.versions[0].delete = True
+    cleanup.versions[2].delete = True
+    app = _app(cleanup)
+    calls = []
+    try:
+        _draw(app)
+        monkeypatch.setattr(
+            app.win, 'flash',
+            lambda message, duration=0: calls.append((message, duration)),
+        )
+
+        _press(app, ord('d'))
+
+        assert calls == [('To delete 2 versions [TODO]', 2.0)]
+    finally:
+        app.win.stop_curses()
+
+
+def test_d_does_nothing_when_nothing_is_marked(monkeypatch):
+    app = _app(_cleanup3())
+    calls = []
+    try:
+        _draw(app)
+        monkeypatch.setattr(app.win, 'flash', lambda *args, **kwargs: calls.append(args))
+
+        _press(app, ord('d'))
+
+        assert calls == []
+    finally:
+        app.win.stop_curses()
+
+
+# --- the s sort action ----------------------------------------------------
+
+def test_s_flips_the_sort_order_and_moves_the_star():
+    cleanup = _mixed()
+    app = _app(cleanup)
+    try:
+        _draw(app)
+        assert cleanup.sort == SORT_BY_VERSION
+        assert '*VERSION' in app.win.head.texts[2]
+
+        _press(app, ord('s'))
+        assert cleanup.sort == SORT_BY_DATE
+        assert [release.version for release in cleanup.versions] == [
+            '1.1', '2.0']
+
+        app.win.clear()
+        _draw(app)
+        assert '*DATE (UTC)' in app.win.head.texts[2]
+        assert '*VERSION' not in app.win.head.texts[2]
+
+        _press(app, ord('s'))
+        assert cleanup.sort == SORT_BY_VERSION
+        assert [release.version for release in cleanup.versions] == [
+            '2.0', '1.1']
     finally:
         app.win.stop_curses()
 
@@ -403,7 +521,8 @@ def test_help_screen_lists_the_selection_and_zone_keys():
         text = '\n'.join(app.win.body.texts)
         for hint in ('x - mark this release', 'X - mark this release',
                      'u - unmark this release', 'U - unmark this release',
-                     'D - date time zone'):
+                     'z - date time zone', 's - change the sort order',
+                     'd - delete the marked versions (TODO)'):
             assert hint in text
         assert tui_mod.UTC_MODE in text
         assert tui_mod.LOCAL_MODE in text

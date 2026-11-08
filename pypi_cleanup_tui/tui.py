@@ -23,8 +23,14 @@ While anything is marked, the releases that will survive are painted in the
 marker stays legible) and dims the rest of the line.  The table therefore shows
 both what is kept and what goes.
 
-``D`` cycles the time zone used by the ``DATE`` column between UTC and the
-machine's local zone; the ``DATE`` title names the zone in force.
+``z`` cycles the time zone used by the ``DATE`` column between UTC and the
+machine's local zone; the ``DATE`` title names the zone in force.  ``s`` flips
+the table between version order and upload-date order -- it is listed on the
+help screen only -- and the sorted column carries a ``*`` before its title.
+
+``d`` is advertised at the front of the hint line once anything is marked.  It
+is a placeholder for the deletion step: it reports the pending count in a short
+message box, because deletion itself is not wired up yet.
 """
 
 from __future__ import annotations
@@ -48,6 +54,8 @@ from console_window import (
     semantic_attr,
 )
 
+from pypi_cleanup_tui.main import SORT_BY_DATE, SORT_BY_VERSION
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from datetime import tzinfo
 
@@ -64,7 +72,12 @@ SCREEN_NAMES = ("MAIN", "HELP")
 #: a plain ``x`` instead of losing the meaning of the column.
 DEL_MARK = "✘"
 
-#: The two values of the ``D`` spinner: show the upload time as recorded (UTC),
+#: The "from here down" arrow in the hint line.  console-window already owns
+#: this character as its ``alert_down`` glyph, so an ASCII terminal draws a
+#: plain ``v`` without any registration here.
+DOWN_MARK = "▼"
+
+#: The two values of the ``z`` spinner: show the upload time as recorded (UTC),
 #: or converted to the machine's local time zone.
 UTC_MODE = "UTC"
 LOCAL_MODE = "Local"
@@ -114,15 +127,27 @@ def format_row(release: Release, now: datetime | None = None,
     )
 
 
-def column_header(mode: str = UTC_MODE, now: datetime | None = None,
+def column_header(mode: str = UTC_MODE, sort: str = SORT_BY_VERSION,
+                  now: datetime | None = None,
                   local_tz: tzinfo | None = None) -> str:
-    """Format the column-label line, naming the zone the DATE column shows."""
+    """Format the column-label line, naming the zone and the active sort.
+
+    The sorted column is marked with a ``*`` before its title: ``DATE`` when the
+    table is ordered by upload time, ``VERSION`` otherwise.  The star fits
+    inside the fixed width of whichever field it marks, so the columns below it
+    never move.
+    """
     date_label = f"DATE ({zone_abbrev(mode, now, local_tz)})"
+    if sort == SORT_BY_DATE:
+        date_label = f"*{date_label}"
+        version_label = "VERSION"
+    else:
+        version_label = "*VERSION"
     return (
         f"{'DEL':<{DEL_WIDTH}} "
         f"{date_label:<{DATE_WIDTH}} "
         f"{'DAYS':>{DAYS_WIDTH}}"
-        f"{' ' * VERSION_GAP}VERSION"
+        f"{' ' * VERSION_GAP}{version_label}"
     )
 
 
@@ -173,11 +198,19 @@ class CleanupApp:
         spin.add_key('unmark_from_here',
                      'U - unmark this release and all below, move up',
                      genre='action', keys=[ord('U')], scope={MAIN_ST})
-        # A cycle, not an action: D rewrites the option in place and the next
+        # Placeholder for the deletion step: the hint only appears once
+        # something is marked, and pressing d reports the pending count.
+        spin.add_key('delete', 'd - delete the marked versions (TODO)',
+                     genre='action', keys=[ord('d')], scope={MAIN_ST})
+        # A cycle, not an action: z rewrites the option in place and the next
         # draw reads it, so there is no time_zone_ACTION method to implement.
-        spin.add_key('time_zone', 'D - date time zone',
-                     vals=[UTC_MODE, LOCAL_MODE], keys=[ord('D')],
+        spin.add_key('time_zone', 'z - date time zone',
+                     vals=[UTC_MODE, LOCAL_MODE], keys=[ord('z')],
                      scope={MAIN_ST})
+        # Sorting changes the model rather than a spinner value, so it is an
+        # action; the help screen is the only place it is advertised.
+        spin.add_key('sort', 's - change the sort order',
+                     genre='action', keys=[ord('s')], scope={MAIN_ST})
         self.win.set_handled_keys(spin.keys)
 
     def handle_key(self, key: int) -> None:
@@ -230,27 +263,38 @@ class MainScreen(CleanupScreen):
     def _draw_headers(self) -> None:
         win = self.app.win
         hints = HeaderLine()
-        hints.bracket_key('q').text(':quit ')
-        hints.bracket_key('?').text(':help ')
+        # Once something is marked, the deletion placeholder leads the line.
+        if self._marked_count():
+            hints.bracket_key('d').text('el ')
+        # Where the label starts with the key itself, the bracket form merges
+        # into one word with the key underlined ("unmark", "zone", "quit").
+        # The from-here-down keys trade "-all" for the arrow glyph.
         hints.bracket_key('x').text(':mark ')
-        hints.bracket_key('X').text(':mark-all ')
-        hints.bracket_key('u').text(':unmark ')
-        hints.bracket_key('U').text(':unmark-all ')
-        hints.bracket_key('D').text(':zone')
+        hints.bracket_key('X').text(f':mark{DOWN_MARK} ')
+        hints.bracket_key('u').text('nmark ')
+        hints.bracket_key('U').text(f'nmark{DOWN_MARK} ')
+        hints.bracket_key('z').text('one ')
+        hints.bracket_key('q').text('uit ')
+        hints.bracket_key('?').text(':help')
         win.add_fancy_header(hints, line_attr=curses.A_DIM)
 
         cleanup = self.app.cleanup
         win.add_header(
             f'User: {cleanup.user or "-"}   '
             f'Project: {cleanup.package}   '
-            f'Index: {cleanup.host}   '
-            f'Releases: {len(cleanup.versions)}   '
-            f'Sort: {cleanup.sort}'
+            f'Index: {cleanup.host}'
         )
         # The column titles are the third header line: dim, and deliberately
         # not underlined, so the releases below stay the visually strongest
-        # thing on the screen.
-        win.add_header(column_header(self._time_mode()), attr=curses.A_DIM)
+        # thing on the screen.  The sorted column carries the star.
+        win.add_header(
+            column_header(self._time_mode(), cleanup.sort),
+            attr=curses.A_DIM,
+        )
+
+    def _marked_count(self) -> int:
+        """How many releases are currently marked for deletion."""
+        return sum(1 for release in self.app.cleanup.versions if release.delete)
 
     def _draw_body(self) -> None:
         win = self.app.win
@@ -267,8 +311,7 @@ class MainScreen(CleanupScreen):
         # Once anything is marked, the surviving releases are the interesting
         # rows: paint them in SUCCESS.  A marked row keeps its DEL cell plain
         # so the marker stays legible and dims the rest of the line.
-        marked = any(release.delete for release in versions)
-        keep_attr = semantic_attr(Theme.SUCCESS) if marked else None
+        keep_attr = semantic_attr(Theme.SUCCESS) if self._marked_count() else None
         for index, release in enumerate(versions):
             row = format_row(release, now, mode)
             context = Context(genre='item', release=release, index=index)
@@ -331,6 +374,20 @@ class MainScreen(CleanupScreen):
         for release in self.app.cleanup.versions[ctx.index:]:
             release.delete = False
         self._pick_release(max(ctx.index - 1, 0))
+
+    def delete_ACTION(self) -> None:
+        """Report the pending deletions; the real deletion is still a TODO."""
+        count = self._marked_count()
+        if not count:
+            return
+        self.app.win.flash(f'To delete {count} versions [TODO]', duration=2.0)
+
+    def sort_ACTION(self) -> None:
+        """Flip the table between version order and upload-date order."""
+        cleanup = self.app.cleanup
+        order = (SORT_BY_DATE if cleanup.sort == SORT_BY_VERSION
+                 else SORT_BY_VERSION)
+        cleanup.sort_versions(order)
 
     def help_screen_ACTION(self) -> None:
         self.app.stack.push(HELP_ST, self.app.win.pick_pos)

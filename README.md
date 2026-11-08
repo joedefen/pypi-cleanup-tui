@@ -38,7 +38,9 @@ The release table opens in the terminal:
 | `X` | mark the picked release and every release below it, then step up |
 | `u` | unmark the picked release, then step down |
 | `U` | unmark the picked release and every release below it, then step up |
-| `D` | switch the `DATE` column between UTC and the local time zone |
+| `z` | switch the `DATE` column between UTC and the local time zone |
+| `s` | change the sort order (listed on the help screen only) |
+| `d` | show the pending deletion count (placeholder; nothing is deleted yet) |
 
 A marked release shows `✘` in the `DEL` column and its remaining cells are
 dimmed; the marker itself stays plain so it is still easy to read.  While
@@ -47,8 +49,14 @@ colour, so both halves of the decision are visible at once.
 
 The column titles sit in a third, dim header line above the table (with no rule
 under it), and the `DATE` title names the zone in force, e.g. `DATE (UTC)` or
-`DATE (EDT)` after pressing `D`.  This is selection only: nothing is deleted
-yet.
+`DATE (EDT)` after pressing `z`.  The sorted column carries a `*` before its
+title: `*VERSION` by default, or `*DATE (UTC)` after `s` switches to upload-date
+order.
+
+The hint line reads `X:mark▼` / `Unmark▼` for the "this row and everything
+below" keys, and leads with `del` once at least one release is marked.  Pressing
+`d` then shows `To delete N versions [TODO]` in a two-second message box.  This
+is selection only: nothing is deleted yet.
 
 `--dump` prints the same table without the interactive interface:
 
