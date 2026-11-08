@@ -1589,6 +1589,12 @@ def test_d_hands_the_marked_versions_to_pypi_cleanup(monkeypatch):
 def test_the_hand_off_runs_the_dry_run_then_the_deletion(monkeypatch, capsys):
     app = _app()
     runs, prompts = [], []
+
+    def fake_fetch(self):
+        self.versions = [Release('3.0', NOW)]
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
     try:
         monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
         monkeypatch.setattr(
@@ -1664,6 +1670,112 @@ def test_a_no_to_the_deletion_leaves_the_index_alone(monkeypatch, capsys):
 
         assert [command[1] for command in runs] == ['--query-only']
         assert 'Deletion' not in capsys.readouterr().out
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_failed_deletion_is_retried_until_it_succeeds(monkeypatch, capsys):
+    app = _app()
+    prompts, runs = [], []
+    statuses = iter([0, 1, 0])          # query ok, first delete fails, retry ok
+
+    def fake_fetch(self):
+        self.versions = [Release('3.0', NOW)]
+        return self.versions
+
+    def answer(question, default):
+        prompts.append(question)
+        return True
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(tui_mod, 'ask_yes_no', answer)
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup',
+            lambda command: runs.append(command) or next(statuses),
+        )
+
+        app.hand_off_to_cleanup(['2.0'])
+
+        assert [command[1] for command in runs] == [
+            '--query-only', '--do-it', '--do-it']
+        assert "RETRY: Del 1 Versions of 'demo'  [yes OR No]?" in prompts
+        out = capsys.readouterr().out
+        assert "Deletion failed for 'demo' (exit status 1)." in out
+        assert "Deletion finished for 'demo'." in out
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_no_to_the_retry_leaves_the_history_alone(monkeypatch):
+    cleanup = _cleanup()
+    cleanup.versions[0].delete = True
+    app = _app(cleanup)
+    prompts, runs = [], []
+    answers = iter([True, True, False])  # dry run yes, delete yes, retry no
+
+    def answer(question, default):
+        prompts.append(question)
+        return next(answers)
+
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(tui_mod, 'ask_yes_no', answer)
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup',
+            lambda command: runs.append(command) or 1,
+        )
+
+        app.hand_off_to_cleanup(['2.0'])
+
+        # A no to the retry stops the loop: no second do-it, no reload.
+        assert [command[1] for command in runs] == ['--query-only', '--do-it']
+        assert [release.version for release in cleanup.versions] == ['2.0', '1.0']
+        assert app.session.get('demo') is None
+        assert prompts[-1] == "RETRY: Del 1 Versions of 'demo'  [yes OR No]?"
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_successful_deletion_reloads_and_clears_the_view(monkeypatch):
+    cleanup = _cleanup()
+    cleanup.versions[0].delete = True
+    app = _app(cleanup)
+    fresh = [Release('3.0', NOW), Release('2.1', NOW)]
+
+    def fake_fetch(self):
+        self.versions = list(fresh)
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    try:
+        app.search_text = '2'
+        app.compile_search()
+        app.win.pick_pos = 0
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no', lambda question, default: True)
+        monkeypatch.setattr(tui_mod, 'run_cleanup', lambda command: 0)
+
+        app.hand_off_to_cleanup(['2.0'])
+        # The run loop redraws the table straight after an action; doing the
+        # same here lets the pick settle on the rebuilt body.
+        _draw(app)
+        app.win.render()
+
+        # The table now holds only what the fresh query returned, and every
+        # trace of the old view -- marks, search and pick -- is gone.
+        assert [release.version for release in cleanup.versions] == ['3.0', '2.1']
+        assert not any(release.delete for release in cleanup.versions)
+        assert app.search_text == ''
+        assert app.search_re is None
+        assert app.win.pick_pos == 0
+        session = app.session['demo']
+        assert (session.deleted, session.versions) == (1, 2)
     finally:
         app.win.stop_curses()
 

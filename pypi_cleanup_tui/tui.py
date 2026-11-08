@@ -60,9 +60,14 @@ act on.  Pressing it leaves curses -- the way vappman runs an external command
 -- shows the ``pypi-cleanup`` command built from the marked versions, asks for
 a dry run, shows what that run reports, and then asks before deleting for
 real.  Both questions take ``yes``, ``no``, or a bare ENTER, which chooses the
-safe answer: the dry run is on by default and the deletion is off.  The table
-comes back intact once the final ENTER is pressed.  A ``--read-only`` run never
-offers ``d``: the hint block reads ``R/O`` instead, always.
+safe answer: the dry run is on by default and the deletion is off.  A deletion
+that fails is offered again behind a ``RETRY:`` prompt until it succeeds or the
+user declines.  Once a deletion succeeds the table re-queries the package and
+drops every trace of the old view -- markings, the search pattern and the pick
+-- exactly as if the package/host pair had just been entered, so the refreshed
+history is what the user sees when the final ENTER brings the table back.  A
+``--read-only`` run never offers ``d``: the hint block reads ``R/O`` instead,
+always.
 
 ``g`` is the stability filter, and it means something different on each screen:
 on the help screen it rotates the gap -- 3, 7, 14, 30 or 60 days -- and on the
@@ -200,6 +205,11 @@ COMMAND_INDENT = '   '
 #: because it only reports; the destructive run defaults to no.
 DRY_RUN_PROMPT = 'Dry-run [Yes OR no]?'
 DELETE_PROMPT = "Del {count} Versions of '{package}'  [yes OR No]?"
+
+#: The deletion question again, after a run failed.  It keeps the exact shape
+#: of DELETE_PROMPT so a retry asks about the same versions the first attempt
+#: did; only the word in front marks it as another try.
+RETRY_PROMPT = 'RETRY: ' + DELETE_PROMPT
 
 #: Width of the gap number in the hint line's ``gap30`` block.  The gap is one
 #: or two digits, so the number is padded and the blocks to its right never
@@ -926,14 +936,18 @@ class CleanupApp:
         helper commands: ``endwin()`` restores the tty -- so the subprocess and
         its questions work -- and ``resume_curses()`` reattaches the screen,
         which the redrawing ``render()`` repaints from the preserved table.
-        The flow is two runs: a ``--query-only`` dry run, then the ``--do-it``
-        deletion; each question defaults to the harmless answer, a bare ENTER
-        takes it, and anything but ``yes`` or ``no`` re-asks.  Answering no to
-        the dry run only skips it; the deletion still needs its own yes.
+        The flow is two runs: a ``--query-only`` dry run, then a ``--do-it``
+        deletion that is retried until it succeeds; each question defaults to
+        the harmless answer, a bare ENTER takes it, and anything but ``yes`` or
+        ``no`` re-asks.  Answering no to the dry run only skips it; the deletion
+        still needs its own yes.  A deletion that succeeds makes the table
+        re-query the package, so the view the user returns to is the history
+        that is actually left, not the one the marks were made against.
         """
         base = cleanup_command(self.cleanup, versions)
         package = self.cleanup.package
         count = len(versions)
+        deleted = 0
         self.win.suspend_curses()
         try:
             _reset_terminal()
@@ -948,14 +962,58 @@ class CleanupApp:
                 DELETE_PROMPT.format(count=count, package=package),
                 default=False,
             ):
-                destroy = cleanup_command(self.cleanup, versions, DO_IT)
-                print(format_command(destroy))
-                print(summary_line('Deletion', package, run_cleanup(destroy)))
-                print()
+                if self._delete_with_retry(versions, package, count):
+                    deleted = count
             press_enter()
         finally:
             self.win.resume_curses()
+        if deleted:
+            self.reload_after_deletion(deleted)
         self.win.render(redraw=True)
+
+    def _delete_with_retry(
+        self,
+        versions: Sequence[str],
+        package: str,
+        count: int,
+    ) -> bool:
+        """Run the ``--do-it`` deletion, reissuing it until it succeeds.
+
+        ``pypi-cleanup`` reports success through its exit status.  A run that
+        fails is offered again behind a ``RETRY:`` prompt, because the marked
+        versions have not changed while the terminal was idle and the same
+        command can be repeated; the loop ends when a run succeeds or the user
+        declines.  Returns whether the marked versions were deleted.
+        """
+        while True:
+            destroy = cleanup_command(self.cleanup, versions, DO_IT)
+            print(format_command(destroy))
+            status = run_cleanup(destroy)
+            print(summary_line('Deletion', package, status))
+            print()
+            if status == 0:
+                return True
+            if not ask_yes_no(
+                RETRY_PROMPT.format(count=count, package=package),
+                default=False,
+            ):
+                return False
+
+    def reload_after_deletion(self, deleted: int) -> None:
+        """Fetch the package again after a successful deletion.
+
+        A deletion changes the history, so the table is rebuilt from a fresh
+        query and every trace of the old view -- the marks, the search pattern
+        and the pick -- is dropped, exactly as if the package/host pair had
+        just been entered.  The session ledger keeps the count, so the package
+        list's DELs column reflects what this run actually removed.
+        """
+        session = self.package_session(self.cleanup.package)
+        session.deleted += deleted
+        self.search_text = ''
+        self.search_re = None
+        self.search_anchor = None
+        self.load_versions()
 
     def _option_for(self, key: int) -> SimpleNamespace | None:
         """The spinner option bound to *key* on the current screen, if any."""
@@ -1472,9 +1530,12 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
             'for the terminal, shows the command, asks for a --query-only dry '
             'run, then asks again before the --do-it deletion; ENTER takes the '
             'safe answer (yes to the dry run, no to the deletion) and only '
-            'yes or no are accepted. The printed command describes the run and '
-            'is not meant to be copied. A read-only run (--read-only) never '
-            'offers d: the hint line reads R/O in its place.',
+            'yes or no are accepted. A failed deletion is offered again behind '
+            'a RETRY: prompt until it succeeds or is declined, and a successful '
+            'one re-queries the package and clears the marks, search and pick '
+            'as if the package had just been opened. The printed command '
+            'describes the run and is not meant to be copied. A read-only run '
+            '(--read-only) never offers d: the hint line reads R/O in its place.',
             'g is the stability filter. On this screen it rotates the gap -- '
             '3, 7, 14, 30 or 60 days; a run starts at 30 and remembers the '
             'choice -- and on the main screen it unmarks every marked release '
