@@ -30,6 +30,11 @@ help screen only -- and the sorted column carries a ``*`` before its title.
 Both settings are stored as soon as they change, so the next run opens the
 table the way this one left it; the help screen lists the saved options.
 
+``T`` opens the THEMES screen, where ``t`` cycles the color theme and ``ESC``
+returns to the table.  The app's ``mono`` choice is not a palette: it turns
+semantic color off, exactly like ``--no-color``, and the choice is remembered
+for the next run just like the other saved options.
+
 ``d`` is advertised at the front of the hint line once anything is marked.  It
 is a placeholder for the deletion step: it reports the pending count in a short
 message box, because deletion itself is not wired up yet.
@@ -38,6 +43,7 @@ message box, because deletion itself is not wired up yet.
 from __future__ import annotations
 
 import curses
+import os
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -53,11 +59,14 @@ from console_window import (
     Screen,
     ScreenStack,
     Theme,
+    appearance,
     semantic_attr,
 )
+from console_window import help as help_text
 
 from pypi_cleanup_tui.main import (
     LOCAL_MODE,
+    MONO_THEME,
     SORT_BY_DATE,
     SORT_BY_VERSION,
     UTC_MODE,
@@ -65,7 +74,7 @@ from pypi_cleanup_tui.main import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
     from datetime import tzinfo
 
     from console_window.backend import RenderBackend
@@ -75,7 +84,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 MAIN_ST = 0
 HELP_ST = 1
-SCREEN_NAMES = ("MAIN", "HELP")
+THEME_ST = 2
+SCREEN_NAMES = ("MAIN", "HELP", "THEMES")
+
+#: Every choice the picker cycles through.  ``mono`` is the app's pseudo-theme,
+#: not a console-window palette; keeping it last makes ``t`` step from the final
+#: palette into mono and wrap back to the first palette.
+THEME_CHOICES = (*Theme.list_all(), MONO_THEME)
 
 #: Marker drawn in the DEL column of a release that will be deleted.  It is
 #: declared to the window as a glyph, so a terminal without the character draws
@@ -156,6 +171,43 @@ def column_header(mode: str = UTC_MODE, sort: str = SORT_BY_VERSION,
     )
 
 
+def resolve_theme(
+    cli_theme: str | None = None,
+    cli_no_color: bool | None = None,
+    saved_theme: str = "",
+    saved_no_color: bool = False,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, str, bool]:
+    """Return ``(choice, palette, colors)`` for the start of a run.
+
+    ``choice`` is what the picker shows -- ``mono`` while color is off --
+    ``palette`` is the console-window theme to install, and ``colors`` is
+    whether the semantic roles may use color.  An explicit ``--no-color`` wins
+    over ``--theme``; otherwise an explicit theme, the ``NO_COLOR`` convention
+    and the remembered choice decide, in that order.
+    """
+    env = os.environ if environ is None else environ
+    # None means "not given", which is different from an explicit false.
+    colors = None if cli_no_color is None else not cli_no_color
+    if cli_theme == MONO_THEME:
+        # mono is a color mode rather than a palette: it turns color off.
+        colors = False
+    elif cli_theme and colors is None:
+        colors = True
+    if colors is None:
+        colors = (
+            not env.get("NO_COLOR")
+            and not saved_no_color
+            and saved_theme != MONO_THEME
+        )
+    palette = cli_theme or saved_theme
+    if palette == MONO_THEME:
+        palette = ""
+    palette = Theme.resolve(palette or Theme.get_current())
+    choice = palette if colors else MONO_THEME
+    return choice, palette, colors
+
+
 class CleanupApp:
     """The console-window application showing one package's release history."""
 
@@ -166,15 +218,35 @@ class CleanupApp:
         singleton: bool = True,
         ini: IniManager | None = None,
         zone: str = UTC_MODE,
+        theme: str | None = None,
+        no_color: bool | None = None,
     ) -> None:
         self.cleanup = cleanup
         #: Optional persistent options.  Without one the TUI runs exactly as
         #: before: changes apply to this session and are not written anywhere.
         self.ini = ini
         self.running = True
+
+        # The color switch is process-wide, so it has to be settled before the
+        # window installs a palette or the first frame is painted in the wrong
+        # mode.  The remembered choice is read from the same store as the rest.
+        stored_theme = getattr(ini.vals, 'theme', '') if ini is not None else ''
+        stored_no_color = (
+            bool(getattr(ini.vals, 'no_color', False)) if ini is not None else False
+        )
+        choice, palette, colors = resolve_theme(
+            cli_theme=theme,
+            cli_no_color=no_color,
+            saved_theme=stored_theme,
+            saved_no_color=stored_no_color,
+        )
+        appearance.set_colors_enabled(colors)
+
         self.opts = SimpleNamespace()
-        # Seeding the option before it is registered is what makes the stored
-        # zone the starting zone: registration only normalises a missing value.
+        # Seeding the options before they are registered is what makes the
+        # stored values the starting values: registration only normalises a
+        # missing value.
+        self.opts.theme = choice
         if zone in ZONES:
             self.opts.time_zone = zone
 
@@ -184,6 +256,9 @@ class CleanupApp:
             # Ctrl-C must not tear the TUI down.  Leaving 0x3 unbound means the
             # window swallows it instead of dispatching a quit action.
             ctrl_c_terminates=False,
+            # Seed the palette explicitly so the window does not inherit one
+            # left behind by a previous run in the same process.
+            theme=palette,
             # The deletion marker is decoration, so the window owns its ASCII
             # fallback and rewrites it when the terminal cannot draw it.
             glyphs={'delete_mark': Glyph(DEL_MARK, 'x')},
@@ -193,6 +268,7 @@ class CleanupApp:
         screens = self.screens = {
             MAIN_ST: MainScreen(self),
             HELP_ST: HelpScreen(self),
+            THEME_ST: ThemeScreen(self),
         }
         self.stack = ScreenStack(self.win, self.opts, SCREEN_NAMES, screens)
 
@@ -200,8 +276,12 @@ class CleanupApp:
         spin.add_key('quit', 'q - quit', genre='action', keys=[ord('q')])
         spin.add_key('help_screen', '? - help', genre='action',
                      keys=[ord('?')], scope={MAIN_ST})
+        # T opens the picker; it is the only way in, and t is bound only on
+        # that screen so the table keeps its own keys untouched.
+        spin.add_key('theme_screen', 'T - themes', genre='action',
+                     keys=[ord('T')], scope={MAIN_ST})
         spin.add_key('escape', 'ESC - back', genre='action',
-                     keys=[27], scope={HELP_ST})
+                     keys=[27], scope={HELP_ST, THEME_ST})
         spin.add_key('mark', 'x - mark this release, move down',
                      genre='action', keys=[ord('x')], scope={MAIN_ST})
         spin.add_key('mark_from_here',
@@ -222,6 +302,10 @@ class CleanupApp:
         spin.add_key('time_zone', 'z - date time zone',
                      vals=list(ZONES), keys=[ord('z')],
                      scope={MAIN_ST})
+        # The same shape for the theme: t only works on the THEMES screen, and
+        # handle_key() is where the chosen palette or mono mode is applied.
+        spin.add_key('theme', 't - cycle themes', vals=list(THEME_CHOICES),
+                     keys=[ord('t')], scope={THEME_ST})
         # Sorting changes the model rather than a spinner value, so it is an
         # action; the help screen is the only place it is advertised.
         spin.add_key('sort', 's - change the sort order',
@@ -234,10 +318,32 @@ class CleanupApp:
             return
         option = self._option_for(key)
         value = self.spin.do_key(key, self.win)
-        # Cycle options change a setting rather than firing an action, and the
-        # one cycle option here is a preference worth keeping between runs.
-        if option is not None and option.genre == 'cycle' and value is not None:
+        # Cycle options change a setting rather than firing an action, and both
+        # preferences are worth keeping between runs.
+        if option is None or option.genre != 'cycle' or value is None:
+            return
+        if option.attr == 'time_zone':
             self.persist(zone=str(value))
+        elif option.attr == 'theme':
+            self.apply_theme_choice(str(value))
+
+    def apply_theme_choice(self, choice: str) -> None:
+        """Make a picker *choice* live and remember it.
+
+        ``mono`` is the app's pseudo-theme: a color mode rather than a palette,
+        so it flips the process-wide switch and leaves the installed palette
+        where it was (the same way ``--no-color`` keeps ``--theme``).  Choosing
+        a real palette is a request for color, so it lifts the switch again and
+        installs the palette.
+        """
+        self.opts.theme = choice
+        if choice == MONO_THEME:
+            appearance.set_colors_enabled(False)
+            self.persist(theme=MONO_THEME, no_color=True)
+            return
+        appearance.set_colors_enabled(True)
+        self.win.set_theme(choice)
+        self.persist(theme=choice, no_color=False)
 
     def _option_for(self, key: int) -> SimpleNamespace | None:
         """The spinner option bound to *key* on the current screen, if any."""
@@ -280,12 +386,16 @@ class CleanupApp:
 
 
 class CleanupScreen(Screen):
-    """Base screen: every screen can receive the global quit action."""
+    """Base screen: every screen can receive the global quit/back actions."""
 
     app: CleanupApp
 
     def quit_ACTION(self) -> None:
         self.app.running = False
+
+    def escape_ACTION(self) -> None:
+        """A pushed screen hands control back to the one below it."""
+        self.app.stack.pop()
 
 
 class MainScreen(CleanupScreen):
@@ -316,7 +426,8 @@ class MainScreen(CleanupScreen):
         hints.bracket_key('U').text(f'nmark{DOWN_MARK} ')
         hints.bracket_key('z').text('one ')
         hints.bracket_key('q').text('uit ')
-        hints.bracket_key('?').text(':help')
+        hints.bracket_key('?').text(':help ')
+        hints.bracket_key('T').text(':themes')
         win.add_fancy_header(hints, line_attr=curses.A_DIM)
 
         # The package summary.  A fancy header, so the bracketed letters read
@@ -439,22 +550,45 @@ class MainScreen(CleanupScreen):
     def help_screen_ACTION(self) -> None:
         self.app.stack.push(HELP_ST, self.app.win.pick_pos)
 
+    def theme_screen_ACTION(self) -> None:
+        self.app.stack.push(THEME_ST, self.app.win.pick_pos)
+
 
 class HelpScreen(CleanupScreen, BasicHelpScreen):
     """The key-help screen; ESC returns to the release table."""
 
-    def escape_ACTION(self) -> None:
-        self.app.stack.pop()
-
     def extra_help_paragraphs(self) -> Iterable[str]:
-        """List the saved options, and where they are saved."""
+        """Explain the theme picker, then list the saved options."""
+        paragraphs = [
+            help_text.theme_paragraph(
+                open_key='T',
+                cycle_key='t',
+                remembered=self.app.ini is not None,
+            ),
+        ]
         ini = self.app.ini
-        if ini is None:
-            return ()
-        stored = ', '.join(
-            f'{key}={getattr(ini.vals, key)!r}' for key in vars(ini.vals)
-        )
-        return (f'Saved options ({ini.config_file_path}): {stored}',)
+        if ini is not None:
+            stored = ', '.join(
+                f'{key}={getattr(ini.vals, key)!r}' for key in vars(ini.vals)
+            )
+            paragraphs.append(f'Saved options ({ini.config_file_path}): {stored}')
+        return tuple(paragraphs)
+
+
+class ThemeScreen(Theme.create_picker_screen(CleanupScreen, cycle_key='t')):
+    """The color-theme picker: ``t`` cycles the choice, ESC returns.
+
+    The picker's swatches follow the shared color switch, so cycling into the
+    app's ``mono`` choice previews exactly what ``--no-color`` looks like: the
+    same rows, painted with the role attributes instead of a palette.  The
+    header names ``mono`` while color is off, because that is the choice in
+    effect; a palette is what turns color back on.
+    """
+
+    def theme_label(self, theme_name: str | None) -> str:
+        if not appearance.colors_enabled():
+            return MONO_THEME
+        return super().theme_label(theme_name)
 
 
 def run_tui(
@@ -463,8 +597,16 @@ def run_tui(
     singleton: bool = True,
     ini: IniManager | None = None,
     zone: str = UTC_MODE,
+    theme: str | None = None,
+    no_color: bool | None = None,
 ) -> int:
     """Present *cleanup* in the terminal and return the process exit status."""
     return CleanupApp(
-        cleanup, backend=backend, singleton=singleton, ini=ini, zone=zone,
+        cleanup,
+        backend=backend,
+        singleton=singleton,
+        ini=ini,
+        zone=zone,
+        theme=theme,
+        no_color=no_color,
     ).run()

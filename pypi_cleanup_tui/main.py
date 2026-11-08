@@ -5,9 +5,10 @@ the PyPI JSON API and keeps it sorted.  The interactive interface lives in
 :mod:`pypi_cleanup_tui.tui`; deletion itself is delegated to ``pypi-cleanup``.
 
 The command line remembers what it was told.  The user, the index, the package
-list, and the two table settings the TUI can change (``zone`` and ``sort``) are
-kept in ``~/.config/pypi-cleanup-tui/config.ini``, and every option's default is
-the stored value -- so a second run can be just ``pypi-cleanup-tui``.
+list, the two table settings the TUI can change (``zone`` and ``sort``), and the
+appearance choices (``theme`` and ``no_color``) are kept in
+``~/.config/pypi-cleanup-tui/config.ini``, and every option's default is the
+stored value -- so a second run can be just ``pypi-cleanup-tui``.
 """
 
 from __future__ import annotations
@@ -28,6 +29,11 @@ from pypi_cleanup_tui.ini import IniManager
 
 #: Program name, and the directory under ``~/.config`` holding the options.
 APP_NAME = "pypi-cleanup-tui"
+
+#: The color mode that is not a palette: choosing it turns semantic color off,
+#: exactly like ``--no-color``.  The palette names themselves live in
+#: console-window; the TUI puts this choice last in its theme list.
+MONO_THEME = "mono"
 
 #: The two package indexes this tool knows about.  ``--host`` takes one of
 #: these keys, and so does the stored ``host`` option.
@@ -64,6 +70,8 @@ DEFAULTS = {
     'packages': '',
     'zone': UTC_MODE,
     'sort': SORT_BY_VERSION,
+    'theme': '',
+    'no_color': False,
 }
 
 
@@ -225,6 +233,38 @@ def _normalise(value: str, allowed: Sequence[str], fallback: str) -> str:
     return value if value in allowed else fallback
 
 
+def _theme_choices() -> tuple[str, ...]:
+    """The theme names, imported lazily so ``--version`` stays light.
+
+    The palette list belongs to console-window, and this module deliberately
+    avoids importing the terminal stack until the TUI is actually needed.
+    """
+    from pypi_cleanup_tui.tui import THEME_CHOICES
+
+    return THEME_CHOICES
+
+
+def _theme_choice(raw: str) -> str:
+    """argparse ``type=`` for ``--theme``; refuses a name nobody knows."""
+    choices = _theme_choices()
+    if raw not in choices:
+        raise argparse.ArgumentTypeError(
+            f"unknown theme {raw!r}; choose one of {', '.join(choices)}"
+        )
+    return raw
+
+
+def _normalise_theme(value: str) -> str:
+    """Return *value* if the theme picker knows it, else no explicit theme.
+
+    A hand-edited ``theme = nonsense`` falls back to the library default
+    instead of being stored and handed to the TUI again on every run.
+    """
+    if not value:
+        return ''
+    return value if value in _theme_choices() else ''
+
+
 def _build_parser(vals: SimpleNamespace) -> argparse.ArgumentParser:
     """Build the parser, defaulting every option to its stored value."""
     parser = argparse.ArgumentParser(
@@ -265,6 +305,22 @@ def _build_parser(vals: SimpleNamespace) -> argparse.ArgumentParser:
         help="PyPI username (kept for the later cleanup step)"
              f' [dflt={vals.user or "(none)"}]',
     )
+    parser.add_argument(
+        "--theme",
+        type=_theme_choice,
+        default=None,
+        metavar="THEME",
+        help="color theme to install; 'mono' turns color off (the TUI's "
+             "THEMES screen lists the palette names)",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        default=None,
+        help="draw the semantic roles with attributes instead of color; "
+             "remembered for the next run, and NO_COLOR does the same when "
+             "the switch is absent",
+    )
     return parser
 
 
@@ -286,6 +342,18 @@ def main(
     host = _normalise(args.host, HOSTS, HOST_PYPI)
     zone = _normalise(vals.zone, ZONES, UTC_MODE)
     sort = _normalise(vals.sort, SORTS, SORT_BY_VERSION)
+    # The command line wins; without it the remembered choice is used, and a
+    # hand-edited unknown name falls back to "no explicit theme".
+    theme = _normalise_theme(args.theme or vals.theme)
+    if args.no_color:
+        no_color = True
+    elif args.theme:
+        # An explicit theme is a request for color unless it is the mono mode.
+        no_color = theme == MONO_THEME
+    else:
+        # A remembered mono choice means color stayed off even if the stored
+        # flag was written by an older version of the file.
+        no_color = bool(vals.no_color) or theme == MONO_THEME
 
     # The table shows one package at a time; the whole list is kept for the
     # next run, where it becomes the default package argument.
@@ -314,6 +382,8 @@ def main(
             packages=','.join(packages),
             zone=zone,
             sort=sort,
+            theme=theme,
+            no_color=no_color,
         )
     except OSError as exc:
         print(f"warning: could not save {ini.config_file_path}: {exc}", file=sys.stderr)
@@ -322,7 +392,13 @@ def main(
     # terminal stack when this project is used only to inspect an index.
     from pypi_cleanup_tui.tui import run_tui
 
-    return run_tui(cleanup, ini=ini, zone=zone)
+    return run_tui(
+        cleanup,
+        ini=ini,
+        zone=zone,
+        theme=args.theme,
+        no_color=args.no_color,
+    )
 
 
 if __name__ == "__main__":

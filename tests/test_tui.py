@@ -11,6 +11,7 @@ import curses
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from console_window import Theme, appearance
 from console_window.backend import HeadlessBackend
 
 from pypi_cleanup_tui import tui as tui_mod
@@ -38,6 +39,15 @@ def _headless_curses_stubs(monkeypatch):
     monkeypatch.setattr(curses, 'has_colors', lambda: False, raising=False)
     monkeypatch.setattr(curses, 'color_pair', lambda n=0: n << 8, raising=False)
     monkeypatch.setattr(curses, 'ACS_HLINE', '-', raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _restore_appearance():
+    """The color switch and theme are process state; put them back after."""
+    colors, theme = appearance.colors_enabled(), Theme.get_current()
+    yield
+    appearance.set_colors_enabled(colors)
+    Theme.set_active(theme)
 
 
 def _cleanup():
@@ -69,13 +79,16 @@ def _mixed():
     return cleanup
 
 
-def _app(cleanup=None, rows=20, cols=100, ini=None, zone=None):
+def _app(cleanup=None, rows=20, cols=100, ini=None, zone=None,
+         theme=None, no_color=None):
     return tui_mod.CleanupApp(
         cleanup or _cleanup(),
         backend=HeadlessBackend(rows=rows, cols=cols),
         singleton=False,
         ini=ini,
         zone=zone or tui_mod.UTC_MODE,
+        theme=theme,
+        no_color=no_color,
     )
 
 
@@ -181,7 +194,7 @@ def test_main_screen_draws_three_header_lines_and_one_row_per_release():
         assert app.win.head.row_cnt == 3
         assert app.win.head.texts[0] == (
             f'x:mark X:mark{tui_mod.DOWN_MARK} unmark '
-            f'Unmark{tui_mod.DOWN_MARK} zone quit ?:help')
+            f'Unmark{tui_mod.DOWN_MARK} zone quit ?:help T:themes')
         # The summary is a fancy header: [p] and [h] are key styled, User is
         # literal.  It is not dimmed, unlike the hint and column lines.
         assert app.win.head.texts[1] == 'User=alice pack=demo host=pypi'
@@ -481,6 +494,136 @@ def test_the_date_title_names_the_local_zone_after_z():
         app.win.stop_curses()
 
 
+# --- the theme picker -----------------------------------------------------
+
+def test_the_hint_line_advertises_the_theme_screen():
+    app = _app()
+    try:
+        _draw(app)
+
+        assert 'T:themes' in app.win.head.texts[0]
+    finally:
+        app.win.stop_curses()
+
+
+def test_t_opens_the_theme_screen_and_esc_returns():
+    app = _app()
+    try:
+        _press(app, ord('T'))
+        assert app.stack.curr.num == tui_mod.THEME_ST
+
+        app.screens[tui_mod.THEME_ST].draw_screen()
+        assert app.win.head.texts[0].startswith('COLOR THEME:')
+
+        _press(app, 27)
+        assert app.stack.curr.num == tui_mod.MAIN_ST
+    finally:
+        app.win.stop_curses()
+
+
+def test_t_cycles_only_on_the_theme_screen():
+    app = _app()
+    try:
+        starting = app.opts.theme
+
+        _press(app, ord('t'))
+        assert app.opts.theme == starting
+        assert app.stack.curr.num == tui_mod.MAIN_ST
+
+        _press(app, ord('T'))
+        _press(app, ord('t'))
+        assert app.opts.theme != starting
+        assert app.stack.curr.num == tui_mod.THEME_ST
+    finally:
+        app.win.stop_curses()
+
+
+def test_choosing_mono_turns_color_off_and_is_remembered(tmp_path):
+    ini = _ini(tmp_path)
+    app = _app(ini=ini)
+    try:
+        _press(app, ord('T'))
+        while app.opts.theme != tui_mod.MONO_THEME:
+            _press(app, ord('t'))
+
+        assert appearance.colors_enabled() is False
+        assert ini.vals.theme == tui_mod.MONO_THEME
+        assert ini.vals.no_color is True
+        assert _ini(tmp_path).vals.theme == tui_mod.MONO_THEME
+        assert _ini(tmp_path).vals.no_color is True
+    finally:
+        app.win.stop_curses()
+
+
+def test_choosing_a_palette_turns_color_back_on(tmp_path):
+    ini = _ini(tmp_path)
+    ini.save(theme=tui_mod.MONO_THEME, no_color=True)
+    app = _app(ini=ini)
+    try:
+        assert appearance.colors_enabled() is False
+
+        _press(app, ord('T'))
+        assert app.opts.theme == tui_mod.MONO_THEME
+        # mono is the last choice, so one step wraps to the first palette.
+        _press(app, ord('t'))
+
+        assert app.opts.theme == tui_mod.THEME_CHOICES[0]
+        assert appearance.colors_enabled() is True
+        assert ini.vals.theme == tui_mod.THEME_CHOICES[0]
+        assert ini.vals.no_color is False
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_stored_mono_choice_starts_in_mono(tmp_path):
+    ini = _ini(tmp_path)
+    ini.save(theme=tui_mod.MONO_THEME, no_color=True)
+    app = _app(ini=ini)
+    try:
+        assert app.opts.theme == tui_mod.MONO_THEME
+        assert appearance.colors_enabled() is False
+
+        app.screens[tui_mod.THEME_ST].draw_screen()
+        assert app.win.head.texts[0].startswith('COLOR THEME:')
+        assert tui_mod.MONO_THEME in app.win.head.texts[0]
+    finally:
+        app.win.stop_curses()
+
+
+def test_no_color_environment_starts_in_mono():
+    choice, palette, colors = tui_mod.resolve_theme(
+        saved_theme='nord', environ={'NO_COLOR': '1'})
+
+    assert colors is False
+    assert choice == tui_mod.MONO_THEME
+    assert palette == 'nord'
+
+
+def test_an_explicit_theme_wins_over_the_environment():
+    choice, palette, colors = tui_mod.resolve_theme(
+        cli_theme='nord', environ={'NO_COLOR': '1'})
+
+    assert (choice, palette, colors) == ('nord', 'nord', True)
+
+
+def test_no_color_wins_over_an_explicit_theme():
+    choice, palette, colors = tui_mod.resolve_theme(
+        cli_theme='nord', cli_no_color=True)
+
+    assert colors is False
+    assert choice == tui_mod.MONO_THEME
+    assert palette == 'nord'
+
+
+def test_mono_as_an_explicit_theme_turns_color_off():
+    choice, palette, colors = tui_mod.resolve_theme(
+        cli_theme=tui_mod.MONO_THEME)
+
+    assert colors is False
+    assert choice == tui_mod.MONO_THEME
+    assert palette in Theme.list_all()
+
+
 # --- the d placeholder ----------------------------------------------------
 
 def test_d_flashes_the_pending_deletion_count(monkeypatch):
@@ -636,6 +779,7 @@ def test_help_screen_lists_the_selection_and_zone_keys():
             assert hint in text
         assert tui_mod.UTC_MODE in text
         assert tui_mod.LOCAL_MODE in text
+        assert 'Color theme' in text
     finally:
         app.win.stop_curses()
 

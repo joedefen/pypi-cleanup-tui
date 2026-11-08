@@ -318,10 +318,68 @@ def test_the_stored_sort_and_zone_are_used_at_startup(monkeypatch, config_path):
     assert kwargs['zone'] == LOCAL_MODE
 
 
+def test_the_theme_switch_is_stored_and_passed_on(monkeypatch, config_path):
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo', '--theme', 'nord'], config_path=config_path) == 0
+
+    _, kwargs = seen[0]
+    assert kwargs['theme'] == 'nord'
+    assert kwargs['no_color'] is None
+    assert stored(config_path).vals.theme == 'nord'
+    assert stored(config_path).vals.no_color is False
+
+
+def test_no_color_is_stored_for_the_next_run(monkeypatch, config_path):
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo', '--no-color'], config_path=config_path) == 0
+
+    _, kwargs = seen[0]
+    assert kwargs['no_color'] is True
+    assert stored(config_path).vals.no_color is True
+
+
+def test_mono_on_the_command_line_stores_color_off(monkeypatch, config_path):
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    capture_tui(monkeypatch)
+
+    assert cli.main(['demo', '--theme', cli.MONO_THEME],
+                    config_path=config_path) == 0
+
+    assert stored(config_path).vals.theme == cli.MONO_THEME
+    assert stored(config_path).vals.no_color is True
+
+
+def test_an_unknown_theme_is_refused(capsys, config_path):
+    with pytest.raises(SystemExit) as caught:
+        cli.main(['demo', '--theme', 'nope'], config_path=config_path)
+
+    assert caught.value.code == 2
+    assert 'unknown theme' in capsys.readouterr().err
+
+
+def test_the_stored_theme_and_no_color_are_used_at_startup(monkeypatch, config_path):
+    stored(config_path, theme='nord', no_color=True)
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo'], config_path=config_path) == 0
+
+    _, kwargs = seen[0]
+    # Without a switch the TUI reads the remembered choice from the store.
+    assert kwargs['theme'] is None
+    assert kwargs['no_color'] is None
+    assert stored(config_path).vals.theme == 'nord'
+    assert stored(config_path).vals.no_color is True
+
+
 def test_a_hand_edited_config_falls_back_to_known_values(monkeypatch, config_path):
     config_path.write_text(
         '[options]\nuser = \nhost = elsewhere\npackages = demo\n'
-        'zone = Mars\nsort = size\n',
+        'zone = Mars\nsort = size\ntheme = nonsense\nno_color = maybe\n',
         encoding='utf-8',
     )
     monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
@@ -333,6 +391,8 @@ def test_a_hand_edited_config_falls_back_to_known_values(monkeypatch, config_pat
     assert cleanup.host_key == 'pypi'
     assert cleanup.sort == SORT_BY_VERSION
     assert kwargs['zone'] == UTC_MODE
+    assert stored(config_path).vals.theme == ''
+    assert stored(config_path).vals.no_color is False
 
 
 def test_a_save_failure_is_only_a_warning(monkeypatch, capsys, config_path):

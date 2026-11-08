@@ -30,6 +30,8 @@ pypi-cleanup-tui pack1,pack2,pack3   # one comma separated list
 pypi-cleanup-tui pack1 pack2 pack3   # ... or one argument each
 pypi-cleanup-tui --host test pack1   # query test.pypi.org instead of pypi.org
 pypi-cleanup-tui -u alice pack1      # the PyPI user, kept for the cleanup step
+pypi-cleanup-tui --theme nord pack1  # install a palette (see the THEMES screen)
+pypi-cleanup-tui --no-color pack1    # attributes instead of color; remembered
 ```
 
 The release table opens in the terminal:
@@ -38,6 +40,8 @@ The release table opens in the terminal:
 | --- | ------ |
 | `q` | quit |
 | `?` | open the help screen; `ESC` returns to the table |
+| `T` | open the THEMES screen; `ESC` returns to the table |
+| `t` | cycle the color theme (THEMES screen only; `mono` turns color off) |
 | `x` | mark the picked release for deletion, then step down |
 | `X` | mark the picked release and every release below it, then step up |
 | `u` | unmark the picked release, then step down |
@@ -67,10 +71,17 @@ below" keys, and leads with `del` once at least one release is marked.  Pressing
 `d` then shows `To delete N versions [TODO]` in a two-second message box.  This
 is selection only: nothing is deleted yet.
 
+The THEMES screen shows the palette names and their swatches.  Its last entry,
+`mono`, is not a palette: choosing it turns semantic color off, exactly like
+`--no-color` (and the `NO_COLOR` convention), while a palette turns color back
+on.  The swatches follow that switch, so `mono` previews what the table looks
+like without color.
+
 ### Options are remembered
 
-The user, the index, the package list, and the two settings the table itself
-can change (`z` for the date zone, `s` for the sort order) are stored in
+The user, the index, the package list, the two settings the table itself
+can change (`z` for the date zone, `s` for the sort order), and the appearance
+(`theme` and whether color is on) are stored in
 `~/.config/pypi-cleanup-tui/config.ini`.  Every option's default is the stored
 value, so after the first run
 
@@ -78,11 +89,11 @@ value, so after the first run
 pypi-cleanup-tui
 ```
 
-re-opens the same package from the same index, with the same zone and order.
-The package list is kept as one comma separated value -- which is why the two
-spellings above are equivalent -- and the table still shows one package per
-run, the first in the list.  The help screen (`?`) lists the saved options and
-the file they came from.
+re-opens the same package from the same index, with the same zone, order and
+theme.  The package list is kept as one comma separated value -- which is why
+the two spellings above are equivalent -- and the table still shows one package
+per run, the first in the list.  The help screen (`?`) lists the saved options
+and the file they came from.
 
 ## Development
 
