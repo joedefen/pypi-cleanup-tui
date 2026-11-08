@@ -42,6 +42,15 @@ install it when it is missing.  `--read-only` skips that check and disarms the
 delete key: the run browses the history and the hint line shows `R/O` where
 `del` would be.
 
+Pressing `d` leaves the table for the bare terminal and runs `pypi-cleanup`
+twice: a `--query-only` dry run first, then, only after a second confirmation,
+the `--do-it` deletion.  Both questions accept `yes`, `no`, or a bare `ENTER`,
+and `ENTER` always takes the safe answer -- yes to the dry run, no to the
+deletion; anything else asks again.  The command printed before each run is a
+description, not something to paste into a shell: the values are quoted for
+reading and a long version pattern is broken after its `|` alternations, so
+the text is not a copy-pasteable command line.
+
 The release table opens in the terminal:
 
 | Key | Action |
@@ -60,7 +69,7 @@ The release table opens in the terminal:
 | `U` | unmark the picked release and every release below it, then step up (marked row only) |
 | `z` | switch the `DATE` column between UTC and the local time zone |
 | `s` | change the sort order |
-| `d` | leave the table and run `pypi-cleanup` on the marked releases; the command is printed, not run, for now |
+| `d` | leave the table, run a `pypi-cleanup` dry run, then the deletion after a second confirmation |
 | `g` | apply the stability gap on the table; on the help screen, rotate the gap instead |
 
 The second header line summarises the run: `User=...`, `[p]ack=...` and
@@ -86,9 +95,9 @@ PACKAGES  x:remove ESC:open ?:help
 
 The untitled first column carries `✓` once this run has loaded that package;
 `VERs` is the number of releases its history held at that load, and `DELs` is
-the number of versions this run has deleted from it (the deletion run is still
-a placeholder, so it stays `0` for now).  Both numbers show `-` until the
-package is loaded, because the screen never invents a count.
+the number of versions this run has deleted from it (a successful deletion run
+does not update this counter yet).  Both numbers show `-` until the package is
+loaded, because the screen never invents a count.
 
 The screen opens with the pick on the package `p` would show next, so `ESC` --
 which opens the picked package in the table and returns -- is one keypress from
@@ -137,13 +146,16 @@ only unmarks down from a marked row.  `del` leads the line once something is
 marked and no pattern is filtering the table -- a filter can hide marked
 releases, so `d` is inert while one is in force.  A `--read-only` run fills that
 same block with `R/O` and never offers `d` at all.  Pressing `d` leaves curses
-for the bare terminal, prints the `pypi-cleanup` command built from the marked
-versions, and waits for `ENTER` below a decorated prompt before re-entering
-curses with the table intact; the deletion itself is still a placeholder, so
-the command is printed rather than executed.  The search field at the end is
-the one block whose width follows its text.  The theme key is listed on the
-help screen only; `gap30` is the stability gap in force, and pressing `g`
-applies it.
+for the bare terminal, where it shows the `pypi-cleanup` command built from the
+marked versions, asks for a `--query-only` dry run, shows what that reports,
+and then asks again before the `--do-it` deletion.  Each question takes `yes`,
+`no`, or a bare `ENTER` for the safe answer (yes to the dry run, no to the
+deletion); a no to the deletion leaves the index alone, and the final `ENTER`
+returns to the table.  The printed command is a description, not a command to
+copy: its values are quoted for reading and a long pattern is broken after its
+`|` alternations.  The search field at the end is the one block whose width
+follows its text.  The theme key is listed on the help screen only; `gap30` is
+the stability gap in force, and pressing `g` applies it.
 
 `g` is the stability filter, and it means something different on each screen: on
 the help screen it rotates the gap -- 3, 7, 14, 30 or 60 days; a first run

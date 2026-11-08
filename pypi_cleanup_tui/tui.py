@@ -4,8 +4,8 @@ The window presents the release history fetched by
 :class:`pypi_cleanup_tui.main.CleanupTui` as a table and lets the user mark the
 releases to delete.  The marking itself is local; the one key that reaches
 outside the process is ``d``, which hands the marked versions to
-``pypi-cleanup``.  The hand-off is wired up, but the run is still printed
-rather than executed, so nothing is written to an index yet.
+``pypi-cleanup``.  The hand-off runs it twice: a ``--query-only`` dry run
+first, then -- once both questions are answered -- the ``--do-it`` deletion.
 
 Three header lines sit above the table: the key hints, the package summary, and
 the column titles.  The column titles live in the header rather than in the
@@ -57,11 +57,12 @@ next run just like the other saved options.
 ``d`` is advertised at the front of the hint line once anything is marked and
 no pattern is in force: a filtered table can hide the releases a deletion would
 act on.  Pressing it leaves curses -- the way vappman runs an external command
--- prints the ``pypi-cleanup`` command line built from the marked versions,
-waits for ENTER below a decorated prompt, and re-enters curses with the table
-intact.  The command is printed rather than executed for now, so the table
-cannot yet write to an index.  A ``--read-only`` run never offers ``d``: the
-hint block reads ``R/O`` instead, always.
+-- shows the ``pypi-cleanup`` command built from the marked versions, asks for
+a dry run, shows what that run reports, and then asks before deleting for
+real.  Both questions take ``yes``, ``no``, or a bare ENTER, which chooses the
+safe answer: the dry run is on by default and the deletion is off.  The table
+comes back intact once the final ENTER is pressed.  A ``--read-only`` run never
+offers ``d``: the hint block reads ``R/O`` instead, always.
 
 ``g`` is the stability filter, and it means something different on each screen:
 on the help screen it rotates the gap -- 3, 7, 14, 30 or 60 days -- and on the
@@ -93,7 +94,7 @@ import bisect
 import curses
 import os
 import re
-import shlex
+import subprocess
 import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -180,6 +181,26 @@ READ_ONLY_HINT = "R/O"
 #: off by blank lines to be unmistakable, the way vappman's does.
 RETURN_PROMPT = "Press ENTER to return to the TUI"
 
+#: The ``pypi-cleanup`` options that take a value.  The display quotes a flag's
+#: value, so it has to know which words are values and which are switches.
+VALUE_FLAGS = ('-u', '-t', '-p', '-r')
+
+#: The mode switch appended to the command each phase runs with.  The command
+#: printed before the first question omits it: it describes the deletion the
+#: marked rows ask for, not either of the two runs that check it.
+QUERY_ONLY = '--query-only'
+DO_IT = '--do-it'
+
+#: How the display lays a command out.  A continued line is indented under the
+#: arguments of the first, and no line is longer than the width.
+COMMAND_WIDTH = 78
+COMMAND_INDENT = '   '
+
+#: The two questions asked between the runs.  The dry run defaults to yes
+#: because it only reports; the destructive run defaults to no.
+DRY_RUN_PROMPT = 'Dry-run [Yes OR no]?'
+DELETE_PROMPT = "Del {count} Versions of '{package}'  [yes OR No]?"
+
 #: Width of the gap number in the hint line's ``gap30`` block.  The gap is one
 #: or two digits, so the number is padded and the blocks to its right never
 #: move when it changes.
@@ -203,27 +224,174 @@ PACKAGE_TITLE = "PACKAGE"
 PACKAGES_TITLE = "PACKAGES"
 
 
-def cleanup_command(cleanup: CleanupTui, versions: Sequence[str]) -> list[str]:
-    """The ``pypi-cleanup`` command line that would delete *versions*.
+def cleanup_command(
+    cleanup: CleanupTui,
+    versions: Sequence[str],
+    mode: str | None = None,
+) -> list[str]:
+    """The ``pypi-cleanup`` command line that deletes *versions*.
 
     The marked versions become one anchored regular expression, so the command
     names exactly the rows the table showed and nothing else; ``re.escape``
     keeps a version identifier's dots and hyphens literal.  ``pypi-cleanup``
-    wants a user and a package, and the user falls back to the login name when
-    no ``-u`` was given.
+    wants a user, the index URL and a package, and the user falls back to the
+    login name when no ``-u`` was given.  *mode* is the phase switch --
+    ``--query-only`` or ``--do-it`` -- and is omitted for the summary command
+    printed before the first question.
     """
     pattern = '^(' + '|'.join(re.escape(version) for version in versions) + ')$'
-    return [
-        CLEANUP_TOOL,
+    command = [CLEANUP_TOOL]
+    if mode:
+        command.append(mode)
+    command += [
+        '-y',
         '-u', cleanup.user or os.environ.get('USER', ''),
+        '-t', cleanup.host_url,
         '-p', cleanup.package,
         '-r', pattern,
     ]
+    return command
 
 
-def format_command(command: Sequence[str]) -> str:
-    """The command as it would be typed in a shell, with a ``+`` marker."""
-    return '+ ' + ' '.join(shlex.quote(part) for part in command)
+def _quoted(value: str) -> str:
+    """Show *value* in single quotes, always, the way the display wants it."""
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def _split_alternatives(pattern: str) -> list[str]:
+    """Break *pattern* after every unescaped ``|``, keeping the pipe.
+
+    A pipe written by ``re.escape`` follows a backslash and stands for a
+    literal ``|`` in a version, so it never becomes a break point.
+    """
+    segments: list[str] = []
+    current = ''
+    escaped = False
+    for char in pattern:
+        current += char
+        if escaped:
+            escaped = False
+        elif char == '\\':
+            escaped = True
+        elif char == '|':
+            segments.append(current)
+            current = ''
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _wrap_pattern(pattern: str, width: int) -> list[str]:
+    """Split *pattern* after ``|`` so each piece fits in *width* characters."""
+    pieces: list[str] = []
+    current = ''
+    for segment in _split_alternatives(pattern):
+        if current and len(current) + len(segment) > width:
+            pieces.append(current)
+            current = segment
+        else:
+            current += segment
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def format_command(command: Sequence[str], width: int = COMMAND_WIDTH) -> str:
+    """Lay *command* out the way the hand-off prints it.
+
+    The values are always quoted, a value too long for one line is broken
+    after its ``|`` alternations, and no ``\\`` is printed at the end of a
+    line.  The result is a description of the run, not a line to paste into a
+    shell: it omits the phase switch, and a split line would not survive a
+    copy.  ``pypi-cleanup`` is handed the argument list itself, so the printed
+    text is never what runs.
+    """
+    lines: list[str] = []
+    line = '+ ' + command[0]
+
+    def add_word(word: str) -> None:
+        nonlocal line
+        if len(line) + 1 + len(word) <= width:
+            line += ' ' + word
+        else:
+            lines.append(line)
+            line = COMMAND_INDENT + word
+
+    def add_value(flag: str, value: str) -> None:
+        nonlocal line
+        quoted = _quoted(value)
+        unit = f'{flag} {quoted}'
+        if len(COMMAND_INDENT) + len(unit) <= width:
+            # The flag and its value stay together, even when they move to a
+            # continuation line, so a reader sees which value belongs to what.
+            if len(line) + 1 + len(unit) <= width:
+                line += ' ' + unit
+            else:
+                lines.append(line)
+                line = COMMAND_INDENT + unit
+            return
+        # Too long for any single line: open the quotes on the flag's line and
+        # break the pattern after its pipes, indenting the pieces to match.
+        lines.append(line)
+        available = width - len(COMMAND_INDENT) - len(flag) - 3
+        pieces = _wrap_pattern(value, available)
+        line = f"{COMMAND_INDENT}{flag} '{pieces[0]}"
+        for piece in pieces[1:]:
+            lines.append(line)
+            line = COMMAND_INDENT + piece
+        line += "'"
+
+    index = 1
+    while index < len(command):
+        token = command[index]
+        if token in VALUE_FLAGS and index + 1 < len(command):
+            add_value(token, command[index + 1])
+            index += 2
+        else:
+            add_word(token)
+            index += 1
+    lines.append(line)
+    return '\n'.join(lines)
+
+
+def ask_yes_no(question: str, default: bool) -> bool:
+    """Ask *question* until the answer is ``yes``, ``no``, or a bare ENTER.
+
+    The answer is compared case-insensitively and must be exactly one of the
+    three; anything else re-asks.  A bare ENTER takes *default*, which lets the
+    harmless dry run start with ENTER and keeps the destructive run unarmed.
+    """
+    while True:
+        answer = input(f'====> {question} ').strip().lower()
+        if not answer:
+            return default
+        if answer == 'yes':
+            return True
+        if answer == 'no':
+            return False
+
+
+def run_cleanup(command: Sequence[str]) -> int:
+    """Run *command* on the bare terminal and return its exit status.
+
+    The argument list goes to :func:`subprocess.call` without a shell, so the
+    pattern :func:`cleanup_command` built reaches ``pypi-cleanup`` exactly as
+    written -- the backslashes ``re.escape`` added are not eaten by a shell.  A
+    missing executable is reported rather than raised, so the table can still
+    come back.
+    """
+    try:
+        return subprocess.call(list(command))
+    except OSError as error:
+        print(f'error: could not run {CLEANUP_TOOL}: {error}')
+        return 1
+
+
+def summary_line(action: str, package: str, status: int) -> str:
+    """The one line printed under a finished ``pypi-cleanup`` run."""
+    if status == 0:
+        return f'{action} finished for {package!r}.'
+    return f'{action} failed for {package!r} (exit status {status}).'
 
 
 def press_enter(message: str = RETURN_PROMPT) -> None:
@@ -751,21 +919,39 @@ class CleanupApp:
         self.win.set_theme(choice)
         self.persist(theme=choice, no_color=False)
 
-    def hand_off_to_cleanup(self, command: Sequence[str]) -> None:
-        """Leave curses for *command*, wait for ENTER, and return to the table.
+    def hand_off_to_cleanup(self, versions: Sequence[str]) -> None:
+        """Leave curses for ``pypi-cleanup``, show the runs, and come back.
 
         The window is suspended, not stopped, the same way vappman runs its
-        helper commands: ``endwin()`` restores the tty -- so a subprocess and a
-        plain ``input()`` prompt work -- and ``resume_curses()`` reattaches the
-        screen, which the redrawing ``render()`` repaints from the preserved
-        table.  The run itself is still a placeholder, so the command is
-        printed rather than executed; the shape of the hand-off is what this
-        method is for.
+        helper commands: ``endwin()`` restores the tty -- so the subprocess and
+        its questions work -- and ``resume_curses()`` reattaches the screen,
+        which the redrawing ``render()`` repaints from the preserved table.
+        The flow is two runs: a ``--query-only`` dry run, then the ``--do-it``
+        deletion; each question defaults to the harmless answer, a bare ENTER
+        takes it, and anything but ``yes`` or ``no`` re-asks.  Answering no to
+        the dry run only skips it; the deletion still needs its own yes.
         """
+        base = cleanup_command(self.cleanup, versions)
+        package = self.cleanup.package
+        count = len(versions)
         self.win.suspend_curses()
         try:
             _reset_terminal()
-            print(format_command(command))
+            print(format_command(base))
+            print()
+            if ask_yes_no(DRY_RUN_PROMPT, default=True):
+                query = cleanup_command(self.cleanup, versions, QUERY_ONLY)
+                print(format_command(query))
+                print(summary_line('Dry run', package, run_cleanup(query)))
+                print()
+            if ask_yes_no(
+                DELETE_PROMPT.format(count=count, package=package),
+                default=False,
+            ):
+                destroy = cleanup_command(self.cleanup, versions, DO_IT)
+                print(format_command(destroy))
+                print(summary_line('Deletion', package, run_cleanup(destroy)))
+                print()
             press_enter()
         finally:
             self.win.resume_curses()
@@ -1181,17 +1367,16 @@ class MainScreen(CleanupScreen):
         The key is inert whenever its block is blank -- nothing marked, a
         pattern filtering the table, or a read-only run -- so a hidden release
         can never be swept up by a deletion the user could not see coming.  The
-        marked versions are read in table order, so the printed command names
-        exactly the rows that were on screen.
+        marked versions are read in table order, so the dry run and the
+        deletion name exactly the rows that were on screen.
         """
         if not self._deletion_offered():
             return
-        versions = [
+        self.app.hand_off_to_cleanup([
             release.version
             for release in self.app.cleanup.versions
             if release.delete
-        ]
-        self.app.hand_off_to_cleanup(cleanup_command(self.app.cleanup, versions))
+        ])
 
     def apply_gap_ACTION(self) -> None:
         """Keep the marked releases that stayed current for the stability gap.
@@ -1284,9 +1469,11 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
             'marked row u and U instead. X and U are inert on a row already in '
             'the state they would produce.',
             'd hands the marked releases to pypi-cleanup. It leaves the table '
-            'for the terminal, shows the command, and waits for ENTER before '
-            'coming back; the run itself is a placeholder, so the command is '
-            'shown rather than executed. A read-only run (--read-only) never '
+            'for the terminal, shows the command, asks for a --query-only dry '
+            'run, then asks again before the --do-it deletion; ENTER takes the '
+            'safe answer (yes to the dry run, no to the deletion) and only '
+            'yes or no are accepted. The printed command describes the run and '
+            'is not meant to be copied. A read-only run (--read-only) never '
             'offers d: the hint line reads R/O in its place.',
             'g is the stability filter. On this screen it rotates the gap -- '
             '3, 7, 14, 30 or 60 days; a run starts at 30 and remembers the '

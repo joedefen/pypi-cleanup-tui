@@ -1411,10 +1411,31 @@ def test_the_cleanup_command_names_the_marked_versions():
     command = tui_mod.cleanup_command(cleanup, ['2.0', '1.0'])
 
     # The versions become one anchored expression, with the dots literal, so
-    # the command names exactly the rows the table showed.
+    # the command names exactly the rows the table showed; -y answers the
+    # program's own warning prompt and -t names the index being queried.
     assert command == [
-        'pypi-cleanup', '-u', 'alice', '-p', 'demo', '-r', '^(2\\.0|1\\.0)$',
+        'pypi-cleanup', '-y', '-u', 'alice', '-t', 'https://pypi.org/',
+        '-p', 'demo', '-r', '^(2\\.0|1\\.0)$',
     ]
+
+
+def test_the_cleanup_command_carries_the_index_url():
+    cleanup = CleanupTui('demo', user='alice', host=HOST_TEST)
+
+    command = tui_mod.cleanup_command(cleanup, ['1.0'])
+
+    assert command[command.index('-t') + 1] == 'https://test.pypi.org/'
+
+
+def test_the_mode_flag_follows_the_tool_name():
+    cleanup = CleanupTui('demo', user='alice')
+
+    query = tui_mod.cleanup_command(cleanup, ['1.0'], tui_mod.QUERY_ONLY)
+    destroy = tui_mod.cleanup_command(cleanup, ['1.0'], tui_mod.DO_IT)
+
+    assert query[:2] == ['pypi-cleanup', '--query-only']
+    assert destroy[:2] == ['pypi-cleanup', '--do-it']
+    assert '--do-it' not in query
 
 
 def test_the_cleanup_command_falls_back_to_the_login_name(monkeypatch):
@@ -1425,9 +1446,108 @@ def test_the_cleanup_command_falls_back_to_the_login_name(monkeypatch):
     assert command[command.index('-u') + 1] == 'login'
 
 
-def test_the_printed_command_is_quoted_for_a_shell():
-    assert (tui_mod.format_command(['pypi-cleanup', '-r', '^(1.0)$'])
-            == "+ pypi-cleanup -r '^(1.0)$'")
+def test_the_display_quotes_every_value():
+    assert tui_mod.format_command(
+        ['pypi-cleanup', '-y', '-u', 'alice', '-p', 'demo']
+    ) == "+ pypi-cleanup -y -u 'alice' -p 'demo'"
+
+
+def test_the_display_breaks_before_the_pattern():
+    command = tui_mod.cleanup_command(
+        CleanupTui('demo', user='alice'), ['2.0', '1.0'])
+
+    lines = tui_mod.format_command(command).splitlines()
+
+    assert lines == [
+        "+ pypi-cleanup -y -u 'alice' -t 'https://pypi.org/' -p 'demo'",
+        "   -r '^(2\\.0|1\\.0)$'",
+    ]
+
+
+def test_a_long_display_wraps_at_a_flag():
+    # A bare switch that will not fit moves to its own continuation line.
+    text = tui_mod.format_command(
+        ['pypi-cleanup', '-y', '--query-only', '-v'], width=24)
+
+    assert text.splitlines() == [
+        '+ pypi-cleanup -y',
+        '   --query-only -v',
+    ]
+
+
+def test_a_long_pattern_is_broken_after_its_pipes():
+    versions = [f'1.{minor}.0' for minor in range(20)]
+    command = tui_mod.cleanup_command(
+        CleanupTui('demo', user='alice'), versions)
+
+    lines = tui_mod.format_command(command).splitlines()
+
+    pattern_lines = lines[1:]
+    assert pattern_lines[0].startswith("   -r '")
+    # Every break follows an alternation, so only the last piece is unclosed.
+    assert all(line.endswith('|') for line in pattern_lines[:-1])
+    assert pattern_lines[-1].endswith(")$'")
+    assert all(len(line) <= tui_mod.COMMAND_WIDTH for line in lines)
+
+
+def test_a_bare_enter_takes_each_question_default(monkeypatch):
+    answers = iter(['', ''])
+    monkeypatch.setattr('builtins.input', lambda prompt='': next(answers))
+
+    assert tui_mod.ask_yes_no(tui_mod.DRY_RUN_PROMPT, default=True) is True
+    assert tui_mod.ask_yes_no('Del?', default=False) is False
+
+
+def test_the_answer_is_read_in_any_case(monkeypatch):
+    answers = iter(['YES', 'No'])
+    monkeypatch.setattr('builtins.input', lambda prompt='': next(answers))
+
+    assert tui_mod.ask_yes_no('Dry-run?', default=False) is True
+    assert tui_mod.ask_yes_no('Dry-run?', default=True) is False
+
+
+def test_an_unrecognised_answer_is_asked_again(monkeypatch):
+    prompts, answers = [], iter(['maybe', 'yes'])
+
+    def fake_input(prompt=''):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr('builtins.input', fake_input)
+
+    assert tui_mod.ask_yes_no('Dry-run?', default=False) is True
+    assert prompts == ['====> Dry-run? ', '====> Dry-run? ']
+
+
+def test_the_run_hands_subprocess_an_argument_list(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tui_mod.subprocess, 'call',
+        lambda command: calls.append(command) or 0,
+    )
+
+    status = tui_mod.run_cleanup(['pypi-cleanup', '-r', '^(1\\.0)$'])
+
+    assert status == 0
+    # A list, not a command string: no shell can eat the pattern's backslashes.
+    assert calls == [['pypi-cleanup', '-r', '^(1\\.0)$']]
+
+
+def test_a_missing_cleanup_tool_is_reported(monkeypatch, capsys):
+    def missing(command):
+        raise OSError('not found')
+
+    monkeypatch.setattr(tui_mod.subprocess, 'call', missing)
+
+    assert tui_mod.run_cleanup(['pypi-cleanup']) == 1
+    assert 'could not run pypi-cleanup' in capsys.readouterr().out
+
+
+def test_the_summary_line_reports_the_exit_status():
+    assert (tui_mod.summary_line('Deletion', 'demo', 0)
+            == "Deletion finished for 'demo'.")
+    assert (tui_mod.summary_line('Deletion', 'demo', 2)
+            == "Deletion failed for 'demo' (exit status 2).")
 
 
 def test_the_prompt_is_decorated_and_waits_for_enter(monkeypatch):
@@ -1453,36 +1573,97 @@ def test_d_hands_the_marked_versions_to_pypi_cleanup(monkeypatch):
     cleanup.versions[0].delete = True
     cleanup.versions[2].delete = True
     app = _app(cleanup)
-    commands = []
+    versions = []
     try:
         _draw(app)
-        monkeypatch.setattr(app, 'hand_off_to_cleanup', commands.append)
+        monkeypatch.setattr(app, 'hand_off_to_cleanup', versions.append)
 
         _press(app, ord('d'))
 
-        assert commands == [[
-            'pypi-cleanup', '-u', 'alice', '-p', 'demo',
-            '-r', '^(2\\.0|1\\.0)$',
-        ]]
+        # Table order, so the dry run and the deletion name the same rows.
+        assert versions == [['2.0', '1.0']]
     finally:
         app.win.stop_curses()
 
 
-def test_the_hand_off_prints_the_command_and_waits_for_enter(monkeypatch, capsys):
+def test_the_hand_off_runs_the_dry_run_then_the_deletion(monkeypatch, capsys):
     app = _app()
-    resets, prompts = [], []
+    runs, prompts = [], []
     try:
-        monkeypatch.setattr(tui_mod, '_reset_terminal',
-                            lambda: resets.append(True))
-        monkeypatch.setattr(tui_mod, 'press_enter', lambda: prompts.append(True))
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'press_enter', lambda: prompts.append('enter'))
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no',
+            lambda question, default: prompts.append(question) or True,
+        )
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup',
+            lambda command: runs.append(command) or 0,
+        )
 
-        app.hand_off_to_cleanup(['pypi-cleanup', '-p', 'demo'])
+        app.hand_off_to_cleanup(['2.0', '1.0'])
 
-        assert resets == [True]
-        assert prompts == [True]
-        assert '+ pypi-cleanup -p demo' in capsys.readouterr().out
-        # The window left curses for the command and is attached again after.
+        assert runs == [
+            ['pypi-cleanup', '--query-only', '-y', '-u', 'alice',
+             '-t', 'https://pypi.org/', '-p', 'demo', '-r', '^(2\\.0|1\\.0)$'],
+            ['pypi-cleanup', '--do-it', '-y', '-u', 'alice',
+             '-t', 'https://pypi.org/', '-p', 'demo', '-r', '^(2\\.0|1\\.0)$'],
+        ]
+        assert prompts == [
+            tui_mod.DRY_RUN_PROMPT,
+            "Del 2 Versions of 'demo'  [yes OR No]?",
+            'enter',
+        ]
+        out = capsys.readouterr().out
+        assert "+ pypi-cleanup -y -u 'alice'" in out
+        assert "Dry run finished for 'demo'." in out
+        assert "Deletion finished for 'demo'." in out
+        # The window left curses for the runs and is attached again after.
         assert app.win.suspended is False
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_no_to_the_dry_run_skips_it(monkeypatch):
+    app = _app()
+    runs = []
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no', lambda question, default: False)
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup',
+            lambda command: runs.append(command) or 0,
+        )
+
+        app.hand_off_to_cleanup(['2.0'])
+
+        assert runs == []
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_no_to_the_deletion_leaves_the_index_alone(monkeypatch, capsys):
+    app = _app()
+    answers, runs = iter([True, False]), []
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no',
+            lambda question, default: next(answers),
+        )
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup',
+            lambda command: runs.append(command) or 0,
+        )
+
+        app.hand_off_to_cleanup(['2.0'])
+
+        assert [command[1] for command in runs] == ['--query-only']
+        assert 'Deletion' not in capsys.readouterr().out
     finally:
         app.win.stop_curses()
 
@@ -1491,6 +1672,8 @@ def test_the_hand_off_comes_back_even_if_the_prompt_fails(monkeypatch):
     app = _app()
     try:
         monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no', lambda question, default: False)
 
         def interrupted():
             raise KeyboardInterrupt
@@ -1498,7 +1681,7 @@ def test_the_hand_off_comes_back_even_if_the_prompt_fails(monkeypatch):
         monkeypatch.setattr(tui_mod, 'press_enter', interrupted)
 
         with pytest.raises(KeyboardInterrupt):
-            app.hand_off_to_cleanup(['pypi-cleanup', '-p', 'demo'])
+            app.hand_off_to_cleanup(['2.0'])
 
         # The finally clause must not leave the terminal in the bare state.
         assert app.win.suspended is False
@@ -1940,6 +2123,8 @@ def test_help_screen_lists_the_selection_and_zone_keys():
         # The bullets are wrapped, so compare them with the breaks removed.
         assert 'newest release counts as stable' in ' '.join(text.split())
         assert 'leaves the table for the terminal' in ' '.join(text.split())
+        assert 'asks for a --query-only dry run' in ' '.join(text.split())
+        assert 'not meant to be copied' in ' '.join(text.split())
         assert '--read-only' in text
         # The notes read as a bulleted list with a hanging indent.
         assert any(line.startswith('* Color theme') for line in app.win.body.texts)

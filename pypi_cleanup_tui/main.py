@@ -175,6 +175,16 @@ class CleanupTui:
         """Human-readable host of the index being queried."""
         return _INDEXES[self.host_key][1]
 
+    @property
+    def host_url(self) -> str:
+        """The index prefix ``pypi-cleanup`` wants for ``-t``.
+
+        The JSON API prefix ends in ``/pypi``; the deletion program wants the
+        site itself, with the trailing slash its default shows
+        (``https://pypi.org/``).
+        """
+        return f"https://{self.host}/"
+
     def fetch_versions(self) -> list[Release]:
         """Fetch all releases that still have files, replacing :attr:`versions`.
 
