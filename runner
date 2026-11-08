@@ -2,7 +2,7 @@
 """runner -- run this checkout's pypi-cleanup-tui without installing it.
 
     ./runner --version
-    ./runner requests --dump
+    ./runner requests
 
 This is the development launcher, not part of a release.  It runs the source
 tree directly: the checkout is put on `sys.path` first, so the package beside

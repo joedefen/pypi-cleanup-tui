@@ -25,7 +25,11 @@ pip install -e .
 ## Usage
 
 ```bash
-pypi-cleanup-tui requests
+pypi-cleanup-tui requests            # one package
+pypi-cleanup-tui pack1,pack2,pack3   # one comma separated list
+pypi-cleanup-tui pack1 pack2 pack3   # ... or one argument each
+pypi-cleanup-tui --host test pack1   # query test.pypi.org instead of pypi.org
+pypi-cleanup-tui -u alice pack1      # the PyPI user, kept for the cleanup step
 ```
 
 The release table opens in the terminal:
@@ -41,6 +45,11 @@ The release table opens in the terminal:
 | `z` | switch the `DATE` column between UTC and the local time zone |
 | `s` | change the sort order (listed on the help screen only) |
 | `d` | show the pending deletion count (placeholder; nothing is deleted yet) |
+
+The second header line summarises the run: `User=...`, `[p]ack=...` and
+`[h]ost=...`.  `User` is read-only and shows `n/a` until `-u` is given; `p` and
+`h` are placeholders for actions still to come, and `host` shows the index key
+(`pypi` or `test`), not its domain name.
 
 A marked release shows `✘` in the `DEL` column and its remaining cells are
 dimmed; the marker itself stays plain so it is still easy to read.  While
@@ -58,11 +67,22 @@ below" keys, and leads with `del` once at least one release is marked.  Pressing
 `d` then shows `To delete N versions [TODO]` in a two-second message box.  This
 is selection only: nothing is deleted yet.
 
-`--dump` prints the same table without the interactive interface:
+### Options are remembered
+
+The user, the index, the package list, and the two settings the table itself
+can change (`z` for the date zone, `s` for the sort order) are stored in
+`~/.config/pypi-cleanup-tui/config.ini`.  Every option's default is the stored
+value, so after the first run
 
 ```bash
-pypi-cleanup-tui requests --dump
+pypi-cleanup-tui
 ```
+
+re-opens the same package from the same index, with the same zone and order.
+The package list is kept as one comma separated value -- which is why the two
+spellings above are equivalent -- and the table still shows one package per
+run, the first in the list.  The help screen (`?`) lists the saved options and
+the file they came from.
 
 ## Development
 
@@ -76,8 +96,8 @@ bt penv        # from the repository root; `bt penv pypi-cleanup-tui` elsewhere
 Run the source tree without installing anything:
 
 ```bash
-./runner requests          # the interactive table
-./runner requests --dump   # the plain table
+./runner requests              # the interactive table
+./runner --host test requests  # the same table, from test.pypi.org
 ```
 
 `runner` executes [`pypi_cleanup_tui/main.py`](pypi_cleanup_tui/main.py) as

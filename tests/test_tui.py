@@ -14,7 +14,11 @@ import pytest
 from console_window.backend import HeadlessBackend
 
 from pypi_cleanup_tui import tui as tui_mod
+from pypi_cleanup_tui.ini import IniManager
 from pypi_cleanup_tui.main import (
+    APP_NAME,
+    DEFAULTS,
+    HOST_TEST,
     SORT_BY_DATE,
     SORT_BY_VERSION,
     CleanupTui,
@@ -65,12 +69,19 @@ def _mixed():
     return cleanup
 
 
-def _app(cleanup=None, rows=20, cols=100):
+def _app(cleanup=None, rows=20, cols=100, ini=None, zone=None):
     return tui_mod.CleanupApp(
         cleanup or _cleanup(),
         backend=HeadlessBackend(rows=rows, cols=cols),
         singleton=False,
+        ini=ini,
+        zone=zone or tui_mod.UTC_MODE,
     )
+
+
+def _ini(tmp_path):
+    """A throwaway option store shaped like the real one."""
+    return IniManager(APP_NAME, config_path=tmp_path / 'config.ini', **DEFAULTS)
 
 
 def _draw(app):
@@ -171,9 +182,12 @@ def test_main_screen_draws_three_header_lines_and_one_row_per_release():
         assert app.win.head.texts[0] == (
             f'x:mark X:mark{tui_mod.DOWN_MARK} unmark '
             f'Unmark{tui_mod.DOWN_MARK} zone quit ?:help')
-        assert 'User: alice' in app.win.head.texts[1]
-        assert 'Project: demo' in app.win.head.texts[1]
-        assert 'Index: pypi.org' in app.win.head.texts[1]
+        # The summary is a fancy header: [p] and [h] are key styled, User is
+        # literal.  It is not dimmed, unlike the hint and column lines.
+        assert app.win.head.texts[1] == 'User=alice pack=demo host=pypi'
+        summary_attrs = [attr for attr, _ in app.win.head.text_attrs[1]]
+        assert not any(attr and attr & curses.A_DIM for attr in summary_attrs)
+        assert any(attr and attr & curses.A_UNDERLINE for attr in summary_attrs)
         assert 'Times' not in app.win.head.texts[1]
         assert 'Sort' not in app.win.head.texts[1]
         assert 'Releases' not in app.win.head.texts[1]
@@ -189,6 +203,26 @@ def test_main_screen_draws_three_header_lines_and_one_row_per_release():
         assert '2024/05/01 12:00' in app.win.body.texts[0]
         assert '2.0' in app.win.body.texts[0]
         assert '1.0' in app.win.body.texts[1]
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_summary_line_shows_n_a_without_a_user():
+    app = _app(CleanupTui('demo'))
+    try:
+        _draw(app)
+
+        assert app.win.head.texts[1] == 'User=n/a pack=demo host=pypi'
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_summary_line_names_the_host_key_not_its_domain():
+    app = _app(CleanupTui('demo', user='alice', host=HOST_TEST))
+    try:
+        _draw(app)
+
+        assert app.win.head.texts[1] == 'User=alice pack=demo host=test'
     finally:
         app.win.stop_curses()
 
@@ -511,6 +545,82 @@ def test_s_flips_the_sort_order_and_moves_the_star():
         app.win.stop_curses()
 
 
+# --- remembered settings ---------------------------------------------------
+
+def test_z_stores_the_zone_for_the_next_run(tmp_path):
+    ini = _ini(tmp_path)
+    app = _app(ini=ini)
+    try:
+        _press(app, ord('z'))
+
+        assert ini.vals.zone == tui_mod.LOCAL_MODE
+        assert _ini(tmp_path).vals.zone == tui_mod.LOCAL_MODE
+    finally:
+        app.win.stop_curses()
+
+
+def test_s_stores_the_sort_order_for_the_next_run(tmp_path):
+    ini = _ini(tmp_path)
+    app = _app(_mixed(), ini=ini)
+    try:
+        _press(app, ord('s'))
+
+        assert ini.vals.sort == SORT_BY_DATE
+        assert _ini(tmp_path).vals.sort == SORT_BY_DATE
+    finally:
+        app.win.stop_curses()
+
+
+def test_saving_a_setting_also_stores_the_index_in_use(tmp_path):
+    ini = _ini(tmp_path)
+    app = _app(CleanupTui('demo', host='test'), ini=ini)
+    try:
+        _press(app, ord('z'))
+
+        assert ini.vals.host == 'test'
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_stored_zone_is_the_starting_zone():
+    app = _app(zone=tui_mod.LOCAL_MODE)
+    try:
+        assert app.spin.get_value('time_zone') == tui_mod.LOCAL_MODE
+    finally:
+        app.win.stop_curses()
+
+
+def test_an_unknown_starting_zone_falls_back_to_utc():
+    app = _app(zone='Mars')
+    try:
+        assert app.spin.get_value('time_zone') == tui_mod.UTC_MODE
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_key_bound_to_another_screen_stores_nothing(tmp_path):
+    ini = _ini(tmp_path)
+    app = _app(ini=ini)
+    try:
+        app.opts.help_screen = True
+        app.stack.perform_actions(app.spin)
+        _press(app, ord('z'))
+
+        assert app.stack.curr.num == tui_mod.HELP_ST
+        assert ini.vals.zone == tui_mod.UTC_MODE
+    finally:
+        app.win.stop_curses()
+
+
+def test_persisting_without_a_store_changes_nothing():
+    app = _app()
+    try:
+        assert app.persist(zone=tui_mod.LOCAL_MODE) is None
+        assert app.spin.get_value('time_zone') == tui_mod.UTC_MODE
+    finally:
+        app.win.stop_curses()
+
+
 # --- actions --------------------------------------------------------------
 
 def test_help_screen_lists_the_selection_and_zone_keys():
@@ -526,6 +636,22 @@ def test_help_screen_lists_the_selection_and_zone_keys():
             assert hint in text
         assert tui_mod.UTC_MODE in text
         assert tui_mod.LOCAL_MODE in text
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_help_screen_lists_the_saved_options(tmp_path):
+    ini = _ini(tmp_path)
+    ini.save(user='alice', packages='demo')
+    app = _app(ini=ini)
+    try:
+        app.screens[tui_mod.HELP_ST].draw_screen()
+
+        text = '\n'.join(app.win.body.texts)
+        assert 'Saved options' in text
+        assert 'config.ini' in text
+        assert "user='alice'" in text
+        assert "packages='demo'" in text
     finally:
         app.win.stop_curses()
 

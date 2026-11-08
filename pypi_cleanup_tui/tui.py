@@ -5,7 +5,7 @@ The window presents the release history fetched by
 releases to delete.  It is selection only: nothing is uploaded, deleted or
 shelled out to yet, so every key here is safe to experiment with.
 
-Three header lines sit above the table: the key hints, the project summary, and
+Three header lines sit above the table: the key hints, the package summary, and
 the column titles.  The column titles live in the header rather than in the
 body, so the pick can never land on them and every body row is a release.
 
@@ -27,6 +27,8 @@ both what is kept and what goes.
 machine's local zone; the ``DATE`` title names the zone in force.  ``s`` flips
 the table between version order and upload-date order -- it is listed on the
 help screen only -- and the sorted column carries a ``*`` before its title.
+Both settings are stored as soon as they change, so the next run opens the
+table the way this one left it; the help screen lists the saved options.
 
 ``d`` is advertised at the front of the hint line once anything is marked.  It
 is a placeholder for the deletion step: it reports the pending count in a short
@@ -54,13 +56,21 @@ from console_window import (
     semantic_attr,
 )
 
-from pypi_cleanup_tui.main import SORT_BY_DATE, SORT_BY_VERSION
+from pypi_cleanup_tui.main import (
+    LOCAL_MODE,
+    SORT_BY_DATE,
+    SORT_BY_VERSION,
+    UTC_MODE,
+    ZONES,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Iterable
     from datetime import tzinfo
 
     from console_window.backend import RenderBackend
 
+    from pypi_cleanup_tui.ini import IniManager
     from pypi_cleanup_tui.main import CleanupTui, Release
 
 MAIN_ST = 0
@@ -76,11 +86,6 @@ DEL_MARK = "✘"
 #: this character as its ``alert_down`` glyph, so an ASCII terminal draws a
 #: plain ``v`` without any registration here.
 DOWN_MARK = "▼"
-
-#: The two values of the ``z`` spinner: show the upload time as recorded (UTC),
-#: or converted to the machine's local time zone.
-UTC_MODE = "UTC"
-LOCAL_MODE = "Local"
 
 #: Column widths.  ``DATE`` is ``YYYY/MM/DD HH:MM`` (16 cells); ``DAYS`` is
 #: right-aligned because it is the only numeric column.
@@ -152,17 +157,26 @@ def column_header(mode: str = UTC_MODE, sort: str = SORT_BY_VERSION,
 
 
 class CleanupApp:
-    """The console-window application showing one project's release history."""
+    """The console-window application showing one package's release history."""
 
     def __init__(
         self,
         cleanup: CleanupTui,
         backend: RenderBackend | None = None,
         singleton: bool = True,
+        ini: IniManager | None = None,
+        zone: str = UTC_MODE,
     ) -> None:
         self.cleanup = cleanup
+        #: Optional persistent options.  Without one the TUI runs exactly as
+        #: before: changes apply to this session and are not written anywhere.
+        self.ini = ini
         self.running = True
         self.opts = SimpleNamespace()
+        # Seeding the option before it is registered is what makes the stored
+        # zone the starting zone: registration only normalises a missing value.
+        if zone in ZONES:
+            self.opts.time_zone = zone
 
         win_opts = ConsoleWindowOpts(
             head_line=True,
@@ -204,8 +218,9 @@ class CleanupApp:
                      genre='action', keys=[ord('d')], scope={MAIN_ST})
         # A cycle, not an action: z rewrites the option in place and the next
         # draw reads it, so there is no time_zone_ACTION method to implement.
+        # handle_key() notices the new value and stores it.
         spin.add_key('time_zone', 'z - date time zone',
-                     vals=[UTC_MODE, LOCAL_MODE], keys=[ord('z')],
+                     vals=list(ZONES), keys=[ord('z')],
                      scope={MAIN_ST})
         # Sorting changes the model rather than a spinner value, so it is an
         # action; the help screen is the only place it is advertised.
@@ -214,9 +229,35 @@ class CleanupApp:
         self.win.set_handled_keys(spin.keys)
 
     def handle_key(self, key: int) -> None:
-        """Route one key returned by the window to the spinner's action."""
-        if key in self.spin.keys:
-            self.spin.do_key(key, self.win)
+        """Route one key to the spinner, storing the value it selects."""
+        if key not in self.spin.keys:
+            return
+        option = self._option_for(key)
+        value = self.spin.do_key(key, self.win)
+        # Cycle options change a setting rather than firing an action, and the
+        # one cycle option here is a preference worth keeping between runs.
+        if option is not None and option.genre == 'cycle' and value is not None:
+            self.persist(zone=str(value))
+
+    def _option_for(self, key: int) -> SimpleNamespace | None:
+        """The spinner option bound to *key* on the current screen, if any."""
+        current = self.stack.curr
+        if current is not None:
+            option = self.spin.key_scopes.get((key, current.num))
+            if option is not None:
+                return option
+        return self.spin.key_to_option.get(key)
+
+    def persist(self, **values: object) -> None:
+        """Store the settings a change has just made, for the next run.
+
+        The index in use is written on every save as well, so a host change
+        would be remembered without every caller having to repeat it.
+        """
+        if self.ini is None:
+            return
+        values.setdefault('host', self.cleanup.host_key)
+        self.ini.save(**values)
 
     def main_loop(self) -> None:
         """Draw the current screen until an action clears :attr:`running`."""
@@ -278,12 +319,17 @@ class MainScreen(CleanupScreen):
         hints.bracket_key('?').text(':help')
         win.add_fancy_header(hints, line_attr=curses.A_DIM)
 
+        # The package summary.  A fancy header, so the bracketed letters read
+        # as key hints, but not dimmed: it sits between the dim hint line and
+        # the dim column titles.  ``User=`` is literal -- there is no key for
+        # it -- while ``[p]`` and ``[h]`` are placeholders for actions still to
+        # come.  The host shows the stored index key (``pypi`` or ``test``).
         cleanup = self.app.cleanup
-        win.add_header(
-            f'User: {cleanup.user or "-"}   '
-            f'Project: {cleanup.package}   '
-            f'Index: {cleanup.host}'
-        )
+        summary = HeaderLine()
+        summary.text(f'User={cleanup.user or "n/a"} ')
+        summary.bracket_key('p').text(f'ack={cleanup.package} ')
+        summary.bracket_key('h').text(f'ost={cleanup.host_key}')
+        win.add_fancy_header(summary)
         # The column titles are the third header line: dim, and deliberately
         # not underlined, so the releases below stay the visually strongest
         # thing on the screen.  The sorted column carries the star.
@@ -388,6 +434,7 @@ class MainScreen(CleanupScreen):
         order = (SORT_BY_DATE if cleanup.sort == SORT_BY_VERSION
                  else SORT_BY_VERSION)
         cleanup.sort_versions(order)
+        self.app.persist(sort=cleanup.sort)
 
     def help_screen_ACTION(self) -> None:
         self.app.stack.push(HELP_ST, self.app.win.pick_pos)
@@ -399,11 +446,25 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
     def escape_ACTION(self) -> None:
         self.app.stack.pop()
 
+    def extra_help_paragraphs(self) -> Iterable[str]:
+        """List the saved options, and where they are saved."""
+        ini = self.app.ini
+        if ini is None:
+            return ()
+        stored = ', '.join(
+            f'{key}={getattr(ini.vals, key)!r}' for key in vars(ini.vals)
+        )
+        return (f'Saved options ({ini.config_file_path}): {stored}',)
+
 
 def run_tui(
     cleanup: CleanupTui,
     backend: RenderBackend | None = None,
     singleton: bool = True,
+    ini: IniManager | None = None,
+    zone: str = UTC_MODE,
 ) -> int:
     """Present *cleanup* in the terminal and return the process exit status."""
-    return CleanupApp(cleanup, backend=backend, singleton=singleton).run()
+    return CleanupApp(
+        cleanup, backend=backend, singleton=singleton, ini=ini, zone=zone,
+    ).run()

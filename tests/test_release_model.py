@@ -7,14 +7,21 @@ so the tests describe the parsing and sorting contract, not the index's state.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from io import StringIO
 
 import pytest
 import requests
 from packaging.version import Version
 
 from pypi_cleanup_tui import main as cli
+from pypi_cleanup_tui.ini import IniManager
 from pypi_cleanup_tui.main import (
+    APP_NAME,
+    DEFAULTS,
+    HOST_TEST,
+    LOCAL_MODE,
+    SORT_BY_DATE,
+    SORT_BY_VERSION,
+    UTC_MODE,
     CleanupTui,
     Release,
     _parse_upload_time,
@@ -108,36 +115,21 @@ def test_sort_refuses_an_unknown_key():
         tui.sort_versions('size')
 
 
-# --- rendering and URLs ---------------------------------------------------
+# --- URLs -----------------------------------------------------------------
 
-def test_dump_without_releases_says_so():
-    stream = StringIO()
-    CleanupTui('demo').dump(stream)
-
-    assert stream.getvalue() == 'No releases found.\n'
-
-
-def test_dump_prints_a_header_and_every_release():
-    tui = CleanupTui('demo')
-    tui.versions = [release('1.2.3'), release('1.0', -3)]
-    stream = StringIO()
-
-    tui.dump(stream)
-
-    lines = stream.getvalue().splitlines()
-    assert lines[0].startswith('VERSION')
-    assert '1.2.3' in lines[2]
-    assert '1.0' in lines[3]
-
-
-def test_index_selection_follows_is_test_pypi():
+def test_index_selection_follows_the_host():
     production = CleanupTui('demo')
-    rehearsal = CleanupTui('demo', is_test_pypi=True)
+    rehearsal = CleanupTui('demo', host=HOST_TEST)
 
     assert production.base_url == 'https://pypi.org/pypi'
     assert production.host == 'pypi.org'
     assert rehearsal.base_url == 'https://test.pypi.org/pypi'
     assert rehearsal.host == 'test.pypi.org'
+
+
+def test_an_unknown_host_is_refused():
+    with pytest.raises(ValueError, match='unknown host'):
+        CleanupTui('demo', host='somewhere')
 
 
 # --- fetching -------------------------------------------------------------
@@ -162,7 +154,7 @@ def test_fetch_versions_skips_empty_releases_and_uses_the_oldest_file(monkeypatc
     assert releases['0.8'] == datetime(2024, 4, 1, 0, 0, tzinfo=timezone.utc)
 
 
-def test_fetch_versions_names_the_missing_project(monkeypatch):
+def test_fetch_versions_names_the_missing_package(monkeypatch):
     monkeypatch.setattr(cli.requests, 'get',
                         lambda url, **kwargs: FakeResponse({}, status_code=404))
 
@@ -180,59 +172,177 @@ def test_fetch_versions_surfaces_a_server_error(monkeypatch):
 
 # --- the command-line entry point -----------------------------------------
 
-def test_main_requires_a_project(capsys):
+@pytest.fixture
+def config_path(tmp_path):
+    """This test's own config file; the real ``~/.config`` is never touched."""
+    return tmp_path / 'config.ini'
+
+
+def stored(config_path, **overrides):
+    """Create the config file, optionally storing more than the defaults."""
+    ini = IniManager(APP_NAME, config_path=config_path, **DEFAULTS)
+    if overrides:
+        ini.save(**overrides)
+    return ini
+
+
+def capture_tui(monkeypatch):
+    """Replace run_tui, collecting every (cleanup, kwargs) it is given."""
+    import pypi_cleanup_tui.tui as tui
+
+    seen = []
+
+    def fake_run_tui(cleanup, **kwargs):
+        seen.append((cleanup, kwargs))
+        return 0
+
+    monkeypatch.setattr(tui, 'run_tui', fake_run_tui)
+    return seen
+
+
+def test_main_requires_a_package(capsys, config_path):
     with pytest.raises(SystemExit) as caught:
-        cli.main([])
+        cli.main([], config_path=config_path)
 
     assert caught.value.code == 2
-    assert 'a project name is required' in capsys.readouterr().err
+    assert 'at least one package name is required' in capsys.readouterr().err
 
 
-def test_main_reports_a_project_the_index_does_not_know(monkeypatch, capsys):
+def test_main_reports_a_package_the_index_does_not_know(monkeypatch, capsys, config_path):
     def missing(self):
-        raise LookupError('project missing')
+        raise LookupError('package missing')
 
     monkeypatch.setattr(CleanupTui, 'fetch_versions', missing)
 
-    assert cli.main(['demo']) == 1
-    assert 'error: project missing' in capsys.readouterr().err
+    assert cli.main(['demo'], config_path=config_path) == 1
+    assert 'error: package missing' in capsys.readouterr().err
 
 
-def test_main_reports_a_network_failure(monkeypatch, capsys):
+def test_main_reports_a_network_failure(monkeypatch, capsys, config_path):
     def broken(self):
         raise requests.ConnectionError('connection refused')
 
     monkeypatch.setattr(CleanupTui, 'fetch_versions', broken)
 
-    assert cli.main(['demo']) == 1
+    assert cli.main(['demo'], config_path=config_path) == 1
     assert 'could not fetch pypi.org/demo' in capsys.readouterr().err
 
 
-def test_main_launches_the_tui_when_dump_is_absent(monkeypatch):
+def test_host_selects_the_index(monkeypatch, capsys, config_path):
+    def broken(self):
+        raise requests.ConnectionError('connection refused')
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', broken)
+
+    assert cli.main(['demo', '--host', 'test'], config_path=config_path) == 1
+    assert 'could not fetch test.pypi.org/demo' in capsys.readouterr().err
+
+
+def test_main_launches_the_tui(monkeypatch, config_path):
     monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    seen = capture_tui(monkeypatch)
 
-    import pypi_cleanup_tui.tui as tui
+    assert cli.main(['demo'], config_path=config_path) == 0
 
-    seen = []
-
-    def fake_run_tui(cleanup):
-        seen.append(cleanup)
-        return 0
-
-    monkeypatch.setattr(tui, 'run_tui', fake_run_tui)
-
-    assert cli.main(['demo']) == 0
-    assert [item.package for item in seen] == ['demo']
+    cleanup, kwargs = seen[0]
+    assert cleanup.package == 'demo'
+    assert kwargs['zone'] == UTC_MODE
+    assert kwargs['ini'].vals.packages == 'demo'
 
 
-def test_main_dumps_the_table_in_the_requested_order(monkeypatch, capsys):
-    def fetched(self):
-        self.versions = [release('1.0', -2), release('2.0', 0)]
-        return self.versions
+# --- what the command line remembers --------------------------------------
 
-    monkeypatch.setattr(CleanupTui, 'fetch_versions', fetched)
+def test_the_saved_package_list_is_one_comma_separated_string(monkeypatch, config_path):
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    seen = capture_tui(monkeypatch)
 
-    assert cli.main(['demo', '--dump', '--sort', 'date']) == 0
-    lines = capsys.readouterr().out.splitlines()
-    assert '2.0' in lines[2]
-    assert '1.0' in lines[3]
+    assert cli.main(['pack1,pack2'], config_path=config_path) == 0
+
+    # The table shows one package at a time; the list is remembered whole.
+    assert [cleanup.package for cleanup, _ in seen] == ['pack1']
+    assert stored(config_path).vals.packages == 'pack1,pack2'
+
+
+def test_separate_package_arguments_are_joined_with_commas(monkeypatch, config_path):
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    capture_tui(monkeypatch)
+
+    assert cli.main(['pack1', 'pack2', 'pack3'], config_path=config_path) == 0
+
+    assert stored(config_path).vals.packages == 'pack1,pack2,pack3'
+
+
+def test_blank_package_names_are_dropped(monkeypatch, config_path):
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    capture_tui(monkeypatch)
+
+    assert cli.main(['pack1,,pack2,'], config_path=config_path) == 0
+
+    assert stored(config_path).vals.packages == 'pack1,pack2'
+
+
+def test_a_later_run_needs_no_arguments(monkeypatch, config_path):
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['-u', 'alice', '--host', 'test', 'pack1,pack2'],
+                    config_path=config_path) == 0
+    assert cli.main([], config_path=config_path) == 0
+
+    assert [cleanup.package for cleanup, _ in seen] == ['pack1', 'pack1']
+    cleanup = seen[1][0]
+    assert cleanup.user == 'alice'
+    assert cleanup.host_key == 'test'
+
+
+def test_the_command_line_replaces_what_was_stored(monkeypatch, config_path):
+    stored(config_path, user='alice', host='test', packages='old1,old2')
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['new'], config_path=config_path) == 0
+
+    assert stored(config_path).vals.packages == 'new'
+    assert seen[0][0].package == 'new'
+
+
+def test_the_stored_sort_and_zone_are_used_at_startup(monkeypatch, config_path):
+    stored(config_path, sort=SORT_BY_DATE, zone=LOCAL_MODE)
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo'], config_path=config_path) == 0
+
+    cleanup, kwargs = seen[0]
+    assert cleanup.sort == SORT_BY_DATE
+    assert kwargs['zone'] == LOCAL_MODE
+
+
+def test_a_hand_edited_config_falls_back_to_known_values(monkeypatch, config_path):
+    config_path.write_text(
+        '[options]\nuser = \nhost = elsewhere\npackages = demo\n'
+        'zone = Mars\nsort = size\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main([], config_path=config_path) == 0
+
+    cleanup, kwargs = seen[0]
+    assert cleanup.host_key == 'pypi'
+    assert cleanup.sort == SORT_BY_VERSION
+    assert kwargs['zone'] == UTC_MODE
+
+
+def test_a_save_failure_is_only_a_warning(monkeypatch, capsys, config_path):
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    capture_tui(monkeypatch)
+
+    def broken(self, **values):
+        raise OSError('read-only home')
+
+    monkeypatch.setattr(IniManager, 'save', broken)
+
+    assert cli.main(['demo'], config_path=config_path) == 0
+    assert 'could not save' in capsys.readouterr().err

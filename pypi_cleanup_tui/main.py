@@ -1,9 +1,13 @@
 """Release history model and command-line entry point for pypi-cleanup-tui.
 
-This module owns the data layer: it fetches a project's release history from
-the PyPI JSON API, keeps it sorted, and can dump it as a plain table.  The
-interactive interface lives in :mod:`pypi_cleanup_tui.tui`; deletion itself is
-delegated to ``pypi-cleanup``.
+This module owns the data layer: it fetches a package's release history from
+the PyPI JSON API and keeps it sorted.  The interactive interface lives in
+:mod:`pypi_cleanup_tui.tui`; deletion itself is delegated to ``pypi-cleanup``.
+
+The command line remembers what it was told.  The user, the index, the package
+list, and the two table settings the TUI can change (``zone`` and ``sort``) are
+kept in ``~/.config/pypi-cleanup-tui/config.ini``, and every option's default is
+the stored value -- so a second run can be just ``pypi-cleanup-tui``.
 """
 
 from __future__ import annotations
@@ -13,19 +17,37 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TextIO
+from pathlib import Path
+from types import SimpleNamespace
 
 import requests
 from packaging.version import InvalidVersion, Version
 
 from pypi_cleanup_tui import __version__
+from pypi_cleanup_tui.ini import IniManager
 
-#: JSON API prefixes for the production and test package indexes.  The test
-#: index is always the last entry, so ``urls[is_test_pypi]`` selects it.
-PYPI_URL = "https://pypi.org/pypi"
-TEST_PYPI_URL = "https://test.pypi.org/pypi"
+#: Program name, and the directory under ``~/.config`` holding the options.
+APP_NAME = "pypi-cleanup-tui"
 
-#: Accepted values for the sort order.
+#: The two package indexes this tool knows about.  ``--host`` takes one of
+#: these keys, and so does the stored ``host`` option.
+HOST_PYPI = "pypi"
+HOST_TEST = "test"
+HOSTS = (HOST_PYPI, HOST_TEST)
+
+#: JSON API prefix and printable hostname of each index.
+_INDEXES = {
+    HOST_PYPI: ("https://pypi.org/pypi", "pypi.org"),
+    HOST_TEST: ("https://test.pypi.org/pypi", "test.pypi.org"),
+}
+
+#: The two values of the TUI's ``z`` spinner: show the upload time as recorded
+#: (UTC), or converted to the machine's local time zone.
+UTC_MODE = "UTC"
+LOCAL_MODE = "Local"
+ZONES = (UTC_MODE, LOCAL_MODE)
+
+#: Accepted values for the sort order.  The TUI's ``s`` key flips between them.
 SORT_BY_VERSION = "version"
 SORT_BY_DATE = "date"
 SORTS = (SORT_BY_VERSION, SORT_BY_DATE)
@@ -33,10 +55,21 @@ SORTS = (SORT_BY_VERSION, SORT_BY_DATE)
 #: Seconds to wait for the PyPI JSON API.
 REQUEST_TIMEOUT = 30.0
 
+#: Every stored option, with the value used before anything has been saved.
+#: ``packages`` is held the same way the command line accepts it: one comma
+#: separated list.
+DEFAULTS = {
+    'user': '',
+    'host': HOST_PYPI,
+    'packages': '',
+    'zone': UTC_MODE,
+    'sort': SORT_BY_VERSION,
+}
+
 
 @dataclass
 class Release:
-    """A single release of a project plus the upload date of its oldest file."""
+    """A single release of a package plus the upload date of its oldest file."""
 
     version: str
     uploaded: datetime
@@ -75,33 +108,34 @@ def _parsed_version(release: Release) -> Version | None:
 
 
 class CleanupTui:
-    """Release history of one project, ready to be presented by the TUI."""
+    """Release history of one package, ready to be presented by the TUI."""
 
     def __init__(
         self,
         package: str,
         user: str | None = None,
-        is_test_pypi: bool = False,
+        host: str = HOST_PYPI,
     ) -> None:
+        if host not in _INDEXES:
+            raise ValueError(f"unknown host {host!r}; expected one of {HOSTS}")
         self.package = package
         self.user = user
-        self.is_test_pypi = is_test_pypi
+        #: Which index to query: one of :data:`HOSTS`.
+        self.host_key = host
         #: Sorted on demand by :meth:`sort_versions`.
         self.versions: list[Release] = []
-        #: ``[pypi prefix, test.pypi prefix]``.
-        self.urls = [PYPI_URL, TEST_PYPI_URL]
         #: Sort order currently applied to :attr:`versions`.
         self.sort = SORT_BY_VERSION
 
     @property
     def base_url(self) -> str:
         """JSON API prefix of the index being queried."""
-        return self.urls[1 if self.is_test_pypi else 0]
+        return _INDEXES[self.host_key][0]
 
     @property
     def host(self) -> str:
         """Human-readable host of the index being queried."""
-        return "test.pypi.org" if self.is_test_pypi else "pypi.org"
+        return _INDEXES[self.host_key][1]
 
     def fetch_versions(self) -> list[Release]:
         """Fetch all releases that still have files, replacing :attr:`versions`.
@@ -118,7 +152,7 @@ class CleanupTui:
         )
         if response.status_code == 404:
             raise LookupError(
-                f"project {self.package!r} was not found on {self.host}"
+                f"package {self.package!r} was not found on {self.host}"
             )
         response.raise_for_status()
 
@@ -167,25 +201,41 @@ class CleanupTui:
         self.sort = key
         return self.versions
 
-    def dump(self, stream: TextIO | None = None) -> None:
-        """Write the version/date table to *stream* (stdout by default)."""
-        stream = stream or sys.stdout
-        if not self.versions:
-            print("No releases found.", file=stream)
-            return
-        width = max([len("VERSION"), *(len(r.version) for r in self.versions)])
-        print(f"{'VERSION':<{width}} UPLOADED (UTC)", file=stream)
-        print(f"{'-' * width} {'-' * 16}", file=stream)
-        for release in self.versions:
-            print(f"{release.version:<{width}} {release.uploaded:%Y-%m-%d %H:%M}", file=stream)
+
+def split_packages(raw: Sequence[str] | str) -> list[str]:
+    """Split the package argument into names, accepting both input forms.
+
+    The command line collects the positional arguments into a list, but the
+    stored option is a single comma separated string; both ``pack1,pack2`` and
+    ``pack1 pack2`` therefore describe the same list of packages.  Blank names
+    (``"pack1,,pack2"``) are dropped.
+    """
+    arguments = [raw] if isinstance(raw, str) else raw
+    names = [name.strip() for argument in arguments for name in argument.split(',')]
+    return [name for name in names if name]
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _normalise(value: str, allowed: Sequence[str], fallback: str) -> str:
+    """Return *value* if it is one of *allowed*, else *fallback*.
+
+    The stored options are read from a file a user can edit, and argparse does
+    not validate a default, so a hand-edited ``host = somewhere`` has to fall
+    back instead of reaching the model.
+    """
+    return value if value in allowed else fallback
+
+
+def _build_parser(vals: SimpleNamespace) -> argparse.ArgumentParser:
+    """Build the parser, defaulting every option to its stored value."""
     parser = argparse.ArgumentParser(
-        prog="pypi-cleanup-tui",
+        prog=APP_NAME,
         description=(
-            "Browse the release history of a PyPI project and choose which "
+            "Browse the release history of a PyPI package and choose which "
             "versions to keep."
+        ),
+        epilog=(
+            f"Defaults come from ~/.config/{APP_NAME}/config.ini; the command "
+            "line and the TUI save them back."
         ),
     )
     # The release gate's smoke stage runs the installed console script with
@@ -195,50 +245,51 @@ def _build_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {__version__}",
     )
-    parser.add_argument(
-        "project",
-        nargs="?",
-        help="PyPI project name",
+    packages_help = (
+        "PyPI package names, either one comma separated list "
+        '("pack1,pack2") or separate arguments'
     )
+    if vals.packages:
+        packages_help += f" [dflt={vals.packages}]"
+    parser.add_argument("packages", nargs="*", help=packages_help)
     parser.add_argument(
-        "-s",
-        "--sort",
-        choices=SORTS,
-        default=SORT_BY_VERSION,
-        help="sort order, descending (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--dump",
-        action="store_true",
-        help="print the version/date table and exit",
-    )
-    parser.add_argument(
-        "--test-pypi",
-        action="store_true",
-        help="query test.pypi.org instead of pypi.org",
+        "--host",
+        choices=HOSTS,
+        default=vals.host,
+        help=f"package index to query [dflt={vals.host}]",
     )
     parser.add_argument(
         "-u",
         "--user",
-        default=None,
-        help="PyPI username (kept for the later cleanup step)",
+        default=vals.user,
+        help="PyPI username (kept for the later cleanup step)"
+             f' [dflt={vals.user or "(none)"}]',
     )
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    config_path: str | Path | None = None,
+) -> int:
     """Command-line entry point.  Returns the process exit status."""
-    parser = _build_parser()
+    ini = IniManager(APP_NAME, config_path=config_path, **DEFAULTS)
+    vals = ini.vals
+    parser = _build_parser(vals)
     args = parser.parse_args(argv)
 
-    if not args.project:
-        parser.error("a project name is required")
+    # The command line wins; an empty one falls back to the stored list.
+    packages = split_packages(args.packages) or split_packages(vals.packages)
+    if not packages:
+        parser.error("at least one package name is required")
 
-    cleanup = CleanupTui(
-        args.project,
-        user=args.user,
-        is_test_pypi=args.test_pypi,
-    )
+    host = _normalise(args.host, HOSTS, HOST_PYPI)
+    zone = _normalise(vals.zone, ZONES, UTC_MODE)
+    sort = _normalise(vals.sort, SORTS, SORT_BY_VERSION)
+
+    # The table shows one package at a time; the whole list is kept for the
+    # next run, where it becomes the default package argument.
+    cleanup = CleanupTui(packages[0], user=args.user or None, host=host)
     try:
         cleanup.fetch_versions()
     except LookupError as exc:
@@ -246,22 +297,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     except requests.RequestException as exc:
         print(
-            f"error: could not fetch {cleanup.host}/{args.project}: {exc}",
+            f"error: could not fetch {cleanup.host}/{cleanup.package}: {exc}",
             file=sys.stderr,
         )
         return 1
 
-    cleanup.sort_versions(args.sort)
+    cleanup.sort_versions(sort)
 
-    if args.dump:
-        cleanup.dump()
-        return 0
+    # Remember what this run asked for, so the next run needs no arguments.
+    # A home directory that cannot be written is a warning, not a failure: the
+    # table is still worth showing.
+    try:
+        ini.save(
+            user=args.user or '',
+            host=host,
+            packages=','.join(packages),
+            zone=zone,
+            sort=sort,
+        )
+    except OSError as exc:
+        print(f"warning: could not save {ini.config_file_path}: {exc}", file=sys.stderr)
 
-    # Imported here so --version and --dump do not pay for the terminal stack
-    # when this project is used only to query or print the release table.
+    # Imported here so `--version` and a failed fetch do not pay for the
+    # terminal stack when this project is used only to inspect an index.
     from pypi_cleanup_tui.tui import run_tui
 
-    return run_tui(cleanup)
+    return run_tui(cleanup, ini=ini, zone=zone)
 
 
 if __name__ == "__main__":
