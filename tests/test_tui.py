@@ -196,7 +196,7 @@ def test_main_screen_draws_three_header_lines_and_one_row_per_release():
         assert app.win.head.row_cnt == 3
         assert app.win.head.texts[0] == (
             f'x:mark X:mark{tui_mod.DOWN_MARK} unmark '
-            f'Unmark{tui_mod.DOWN_MARK} zone quit ?:help T:themes')
+            f'Unmark{tui_mod.DOWN_MARK} zone quit ?:help /')
         # The summary is a fancy header: [p] and [h] are key styled, User is
         # literal.  It is not dimmed, unlike the hint and column lines.
         assert app.win.head.texts[1] == 'User=alice pack=demo host=pypi'
@@ -496,16 +496,261 @@ def test_the_date_title_names_the_local_zone_after_z():
         app.win.stop_curses()
 
 
-# --- the theme picker -----------------------------------------------------
+# --- incremental search ---------------------------------------------------
 
-def test_the_hint_line_advertises_the_theme_screen():
+def test_the_hint_line_keeps_a_bare_search_field_and_hides_the_theme_key():
     app = _app()
     try:
         _draw(app)
 
-        assert 'T:themes' in app.win.head.texts[0]
+        assert app.win.head.texts[0].endswith(' /')
+        assert 'T:themes' not in app.win.head.texts[0]
     finally:
         app.win.stop_curses()
+
+
+def test_slash_opens_the_search_and_enter_closes_it():
+    app = _app(_cleanup3())
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+
+        assert app.search_bar.is_active is True
+        assert app.win.passthrough_mode is True
+        # ENTER has to be forwarded through the window for the bar to see it.
+        assert 10 in app.win.handled_keys
+
+        for char in '1.1':
+            _press(app, ord(char))
+        assert app.search_text == '1.1'
+
+        _press(app, 10)
+        assert app.search_bar.is_active is False
+        assert app.win.passthrough_mode is False
+    finally:
+        app.win.stop_curses()
+
+
+def test_typing_filters_the_body_as_the_search_runs():
+    app = _app(_cleanup3())
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+        for char in '1.1':
+            _press(app, ord(char))
+
+        assert [release.version for release in app.visible_versions()] == ['1.1']
+
+        _press(app, 10)
+        app.win.clear()
+        _draw(app)
+        assert app.win.body.row_cnt == 1
+        assert '1.1' in app.win.body.texts[0]
+        assert app.win.head.texts[0].endswith(' /1.1')
+    finally:
+        app.win.stop_curses()
+
+
+def test_shift_x_marks_only_the_visible_rows_after_a_search():
+    cleanup = _cleanup3()
+    app = _app(cleanup)
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+        for char in '1.1':
+            _press(app, ord(char))
+        _press(app, 10)
+        app.win.clear()
+        _draw(app)
+
+        app.win.pick_pos = 0
+        _press(app, ord('X'))
+
+        assert [release.delete for release in cleanup.versions] == [
+            False, True, False]
+        assert app.win.pick_pos == 0
+    finally:
+        app.win.stop_curses()
+
+
+def test_x_steps_down_through_the_visible_rows_only():
+    cleanup = _cleanup3()
+    app = _app(cleanup)
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+        _press(app, ord('1'))
+        _press(app, 10)
+        app.win.clear()
+        _draw(app)
+
+        assert [release.version for release in app.visible_versions()] == [
+            '1.1', '1.0']
+        app.win.pick_pos = 0
+        _press(app, ord('x'))
+
+        assert [release.delete for release in cleanup.versions] == [
+            False, True, False]
+        assert app.win.pick_pos == 1
+    finally:
+        app.win.stop_curses()
+
+
+def test_shift_u_unmarks_only_the_visible_rows_after_a_search():
+    cleanup = _cleanup3()
+    for release in cleanup.versions:
+        release.delete = True
+    app = _app(cleanup)
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+        for char in '1.1':
+            _press(app, ord(char))
+        _press(app, 10)
+        app.win.clear()
+        _draw(app)
+
+        app.win.pick_pos = 0
+        _press(app, ord('U'))
+
+        assert [release.delete for release in cleanup.versions] == [
+            True, False, True]
+        assert app.win.pick_pos == 0
+    finally:
+        app.win.stop_curses()
+
+
+def test_escape_restores_the_pattern_the_search_started_with():
+    app = _app(_cleanup3())
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+        for char in '1.1':
+            _press(app, ord(char))
+        _press(app, 10)
+
+        _press(app, ord('/'))
+        for char in '0':
+            _press(app, ord(char))
+        assert app.search_text == '1.10'
+
+        _press(app, 27)
+        assert app.search_bar.is_active is False
+        assert app.search_text == '1.1'
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_key_the_search_does_not_handle_closes_the_pattern_first():
+    app = _app(_cleanup3())
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+        for char in '1.1':
+            _press(app, ord(char))
+
+        _press(app, curses.KEY_DOWN)
+
+        assert app.search_bar.is_active is False
+        assert app.search_text == '1.1'
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_pattern_that_matches_nothing_says_so():
+    app = _app(_cleanup3())
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+        for char in 'zzz':
+            _press(app, ord(char))
+        _press(app, 10)
+
+        app.win.clear()
+        _draw(app)
+
+        assert app.win.body.texts == ['No matching releases.']
+    finally:
+        app.win.stop_curses()
+
+
+def _app_with_release_candidates():
+    """A table with a mixed-case version and a release from a second series."""
+    cleanup = CleanupTui('demo', user='alice')
+    cleanup.versions = [
+        Release('2.0', NOW),
+        Release('1.2RC1', NOW - timedelta(days=5)),
+        Release('1.0', NOW - timedelta(days=10)),
+    ]
+    return _app(cleanup)
+
+
+def test_the_pattern_is_a_regular_expression():
+    app = _app_with_release_candidates()
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+        # The dot is escaped and [02] is a character class: a plain substring
+        # match would find neither row.
+        for char in '1\\.[02]':
+            _press(app, ord(char))
+        _press(app, 10)
+
+        assert [release.version for release in app.visible_versions()] == [
+            '1.2RC1', '1.0']
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_pattern_ignores_case():
+    app = _app_with_release_candidates()
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+        for char in 'rc':
+            _press(app, ord(char))
+        _press(app, 10)
+
+        assert [release.version for release in app.visible_versions()] == [
+            '1.2RC1']
+    finally:
+        app.win.stop_curses()
+
+
+def test_escape_on_an_untouched_search_leaves_the_table_unfiltered():
+    app = _app(_cleanup3())
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+        _press(app, 27)
+
+        assert app.search_bar.is_active is False
+        assert app.search_text == ''
+        assert [release.version for release in app.visible_versions()] == [
+            '2.0', '1.1', '1.0']
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_pattern_that_does_not_compile_yet_shows_every_release():
+    app = _app(_cleanup3())
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+        _press(app, ord('['))
+        _press(app, 10)
+
+        assert [release.version for release in app.visible_versions()] == [
+            '2.0', '1.1', '1.0']
+
+        app.win.clear()
+        _draw(app)
+        assert app.win.body.row_cnt == 3
+    finally:
+        app.win.stop_curses()
+
+
+# --- the theme picker -----------------------------------------------------
 
 
 def test_t_opens_the_theme_screen_and_esc_returns():
@@ -951,11 +1196,13 @@ def test_help_screen_lists_the_selection_and_zone_keys():
                      'u - unmark this release', 'U - unmark this release',
                      'z - date time zone', 's - change the sort order',
                      'p - next package', 'h - switch index',
+                     'T - themes', '/ - incremental search',
                      'd - delete the marked versions (TODO)'):
             assert hint in text
         assert tui_mod.UTC_MODE in text
         assert tui_mod.LOCAL_MODE in text
         assert 'Color theme' in text
+        assert 'visible rows only' in text
     finally:
         app.win.stop_curses()
 

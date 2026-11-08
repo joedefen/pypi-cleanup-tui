@@ -40,6 +40,7 @@ The release table opens in the terminal:
 | --- | ------ |
 | `q` | quit |
 | `?` | open the help screen; `ESC` returns to the table |
+| `/` | open the incremental search; `ENTER` closes it, `ESC` restores the pattern |
 | `T` | open the THEMES screen; `ESC` returns to the table |
 | `t` | cycle the color theme (THEMES screen only; `mono` turns color off) |
 | `p` | show the next package in the list and reload |
@@ -63,6 +64,17 @@ colour, then the releases appear.  `p` does not reload when the list holds only
 one package.  A failed load opens a modal alert with the error details;
 dismissing it leaves the body empty, ready for another package or index.
 
+The first header line always ends with a search field: a bare `/` before
+anything is typed, then `/pattern` after a search.  Pressing `/` opens it and
+typing filters the releases as you go.  The pattern is a case-insensitive
+regular expression matched against the version column, the same shape as
+vappman's filter: `^1\.` selects the 1.x releases and `[ab]` is a character
+class.  An empty pattern -- or one that does not compile yet, such as a lone
+`[` while it is being typed -- leaves the table unfiltered.  `ENTER` accepts
+the pattern and `ESC` restores the text the search started with.  Once the
+pattern is closed, `x`, `X`, `u` and `U` apply to the visible rows only, so a
+filtered table can be marked without touching the hidden releases.
+
 A marked release shows `✘` in the `DEL` column and its remaining cells are
 dimmed; the marker itself stays plain so it is still easy to read.  While
 anything is marked, the releases that will be kept are drawn in the success
@@ -75,9 +87,10 @@ title: `*VERSION` by default, or `*DATE (UTC)` after `s` switches to upload-date
 order.
 
 The hint line reads `X:mark▼` / `Unmark▼` for the "this row and everything
-below" keys, and leads with `del` once at least one release is marked.  Pressing
-`d` then shows `To delete N versions [TODO]` in a two-second message box.  This
-is selection only: nothing is deleted yet.
+below" keys, leads with `del` once at least one release is marked, and ends
+with the search field described above.  The theme key is listed on the help
+screen only.  Pressing `d` shows `To delete N versions [TODO]` in a two-second
+message box.  This is selection only: nothing is deleted yet.
 
 The THEMES screen shows the palette names and their swatches.  Its last entry,
 `mono`, is not a palette: choosing it turns semantic color off, exactly like
