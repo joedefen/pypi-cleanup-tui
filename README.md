@@ -1,4 +1,4 @@
-> ** UNDER DEVELOPMENT --- BE PATIENT **
+> **UNDER DEVELOPMENT --- BE PATIENT**
 # pypi-cleanup-tui
 
 A terminal user interface (TUI) for cleaning up PyPI packages.
@@ -30,14 +30,23 @@ pypi-cleanup-tui
 
 ## Development
 
-```bash
-# Create and activate a virtual environment
-python -m venv .venv
-source .venv/bin/activate
+The checkout's `.venv` is built by `bt`, which installs the package editable
+together with the `dev` extra (pytest, ruff, build and twine):
 
-# Install in editable mode
-pip install -e .
+```bash
+bt penv        # from the repository root; `bt penv pypi-cleanup-tui` elsewhere
 ```
+
+Run the test gate with the same commands `./bless` runs, on that interpreter:
+
+```bash
+.venv/bin/python -m ruff check .
+.venv/bin/python -m pytest -q --cov=pypi_cleanup_tui
+```
+
+Releases go through `./bless`, never through a hand-run build or upload; see
+[`tests/README-DEV.md`](tests/README-DEV.md) for the gate, its stages and the
+branch model.
 
 ## License
 

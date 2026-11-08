@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Sequence, TextIO
+from typing import TextIO
 
 import requests
 from packaging.version import InvalidVersion, Version
+
+from pypi_cleanup_tui import __version__
 
 #: JSON API prefixes for the production and test package indexes.  The test
 #: index is always the last entry, so ``urls[is_test_pypi]`` selects it.
@@ -182,6 +185,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "Browse the release history of a PyPI project and choose which "
             "versions to keep."
         ),
+    )
+    # The release gate's smoke stage runs the installed console script with
+    # `--version` and requires this project's version in the output.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "project",

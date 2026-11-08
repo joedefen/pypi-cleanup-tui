@@ -1,13 +1,55 @@
+# pypi-cleanup-tui -- packaging, the test gate and the release gate
+# ================================================================
+#
+# Sources of truth
+# ----------------
+# * Build backend: hatchling.  The release number lives in
+#   `pypi_cleanup_tui/__init__.py:__version__` and nowhere else;
+#   `dynamic = ["version"]` tells hatchling to read it there, so a second copy
+#   of the version cannot drift away from the code.
+# * Layout: flat -- the package is `pypi_cleanup_tui/` at the repository root.
+#   `./bless` resolves the package relative to its own directory, so the flat
+#   layout is what lets the gate read this tree.
+# * `pypi-cleanup-tui` is the console script (`pypi_cleanup_tui.main:main`) and
+#   answers `--version`, which is what the release gate's smoke stage reads back
+#   out of the built wheel.
+#
+# The gates
+# ---------
+# `./bless` runs the same three commands, on the same interpreter, that a
+# contributor runs from this checkout's `.venv` (made by `bt penv`):
+#
+#   python -m ruff check .
+#   python -m compileall -q pypi_cleanup_tui tests
+#   python -m pytest -q --cov=pypi_cleanup_tui --cov-report=term-missing
+#
+# Releasing
+# ---------
+# `./bless` is the only path to an upload: every run refuses a dirty tree and a
+# version already on the index, runs the gates, builds a wheel and an sdist,
+# inspects them with tests/inspect_dist.py, runs `twine check --strict`, smoke
+# installs the wheel, and only then asks `====> Enter test or publish or quit:`.
+# See tests/README-DEV.md for the stages and ../blessd/docs/release-strategy.md
+# for the strategy every project shares.
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
 name = "pypi-cleanup-tui"
-version = "1.0.0"
+# The release number lives in `pypi_cleanup_tui/__init__.py`.  This table only
+# declares where it comes from, so `bless`, the built artifacts and
+# `pypi-cleanup-tui --version` all report the same string.
+dynamic = ["version"]
 description = "A terminal user interface for cleaning up PyPI packages."
 readme = "README.md"
-license = { text = "MIT" }
+# PEP 639: an SPDX expression plus the file it refers to.  The old
+# `License :: OSI Approved :: MIT License` classifier is deliberately gone --
+# Metadata 2.4 and later carry License-Expression, and declaring both invites
+# them to disagree.
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = []
 keywords = ["pypi", "cleanup", "tui", "terminal"]
@@ -15,7 +57,6 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -24,14 +65,24 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
-    "packaging>=23.0",
+    # The gate refuses a `packaging` older than 26: the validator must be at
+    # least as new as the metadata writer.  Declaring the same floor here means
+    # the installed package always satisfies the gate.
+    "packaging>=26",
     "requests>=2.28",
 ]
 
 [project.optional-dependencies]
+# The release toolchain.  `./bless` refuses to start unless `twine` and
+# `packaging` meet its own floors, so the same floors are declared here and the
+# extra always installs a toolchain the release gate accepts.
 dev = [
     "pytest>=7.0",
+    "pytest-cov>=4.0",
     "ruff>=0.4",
+    "build>=1.2",
+    "twine>=7",
+    "packaging>=26",
 ]
 
 [project.urls]
@@ -42,5 +93,58 @@ Issues = "https://github.com/your-username/pypi-cleanup-tui/issues"
 [project.scripts]
 pypi-cleanup-tui = "pypi_cleanup_tui.main:main"
 
+[tool.hatch.version]
+# Read the single `__version__` line without importing the package: the build
+# must also work in a tree that was never installed.
+source = "regex"
+path = "pypi_cleanup_tui/__init__.py"
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/pypi_cleanup_tui"]
+packages = ["pypi_cleanup_tui"]
+
+[tool.hatch.build.targets.sdist]
+# A deliberately lean sdist: the package, the tests that exercise it, and the
+# files the inspector asserts on.  The vendored gate is not part of a release.
+include = [
+    "pypi_cleanup_tui",
+    "tests",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+]
+
+[tool.bless]
+# The branch model `./bless` keeps.  `["main"]` releases from the trunk alone;
+# `["main", "dev"]` -- the default when this setting is absent -- aligns a
+# development branch with the trunk before tagging.  This project commits to
+# the trunk, so a release needs no second branch.
+branches = ["main"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+# Pin the measured package no matter which directory pytest is started from, so
+# the number the release gate prints is reproducible.
+source = ["pypi_cleanup_tui"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+# Measured at 99%; the floor is a ratchet against new code arriving without a
+# test, not a target to optimise.  Raise it when the number rises.
+fail_under = 90
+show_missing = true
+
+[tool.ruff]
+# Keep the lint gate identical on every machine: no global or user config can
+# change which rules the gate enforces.  3.10 is the oldest interpreter
+# `requires-python` allows.
+target-version = "py310"
+line-length = 100
+extend-exclude = ["build", "dist", ".venv"]
+
+[tool.ruff.lint]
+# Small, high-signal set: pycodestyle errors, Pyflakes, import sorting,
+# pyupgrade and bugbear.  Formatting-only rules are intentionally excluded, so
+# `ruff check` never argues about layout this codebase already settled.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
