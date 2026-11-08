@@ -42,6 +42,8 @@ The release table opens in the terminal:
 | `?` | open the help screen; `ESC` returns to the table |
 | `T` | open the THEMES screen; `ESC` returns to the table |
 | `t` | cycle the color theme (THEMES screen only; `mono` turns color off) |
+| `p` | show the next package in the list and reload |
+| `h` | switch between pypi.org and test.pypi.org and reload |
 | `x` | mark the picked release for deletion, then step down |
 | `X` | mark the picked release and every release below it, then step up |
 | `u` | unmark the picked release, then step down |
@@ -51,9 +53,15 @@ The release table opens in the terminal:
 | `d` | show the pending deletion count (placeholder; nothing is deleted yet) |
 
 The second header line summarises the run: `User=...`, `[p]ack=...` and
-`[h]ost=...`.  `User` is read-only and shows `n/a` until `-u` is given; `p` and
-`h` are placeholders for actions still to come, and `host` shows the index key
-(`pypi` or `test`), not its domain name.
+`[h]ost=...`.  `User` is read-only and shows `n/a` until `-u` is given; `p`
+rotates through the package list and `h` switches the index, reloading the
+table in both cases.  `host` shows the index key (`pypi` or `test`), not its
+domain name.
+
+The table loads after it opens: the body shows `Loading ...` in the hot-swap
+colour, then the releases appear.  `p` does not reload when the list holds only
+one package.  A failed load opens a modal alert with the error details;
+dismissing it leaves the body empty, ready for another package or index.
 
 A marked release shows `✘` in the `DEL` column and its remaining cells are
 dimmed; the marker itself stays plain so it is still easy to read.  While

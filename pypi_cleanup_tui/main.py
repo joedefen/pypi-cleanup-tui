@@ -3,6 +3,8 @@
 This module owns the data layer: it fetches a package's release history from
 the PyPI JSON API and keeps it sorted.  The interactive interface lives in
 :mod:`pypi_cleanup_tui.tui`; deletion itself is delegated to ``pypi-cleanup``.
+The TUI triggers the fetch after it opens, so a failed lookup is reported in an
+alert over the table instead of ending the run before anything is drawn.
 
 The command line remembers what it was told.  The user, the index, the package
 list, the two table settings the TUI can change (``zone`` and ``sort``), and the
@@ -356,21 +358,10 @@ def main(
         no_color = bool(vals.no_color) or theme == MONO_THEME
 
     # The table shows one package at a time; the whole list is kept for the
-    # next run, where it becomes the default package argument.
+    # next run, where it becomes the default package argument.  The TUI owns
+    # the fetch: it opens first, draws a loading line, then loads the history
+    # and turns any failure into an alert over the table.
     cleanup = CleanupTui(packages[0], user=args.user or None, host=host)
-    try:
-        cleanup.fetch_versions()
-    except LookupError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except requests.RequestException as exc:
-        print(
-            f"error: could not fetch {cleanup.host}/{cleanup.package}: {exc}",
-            file=sys.stderr,
-        )
-        return 1
-
-    cleanup.sort_versions(sort)
 
     # Remember what this run asked for, so the next run needs no arguments.
     # A home directory that cannot be written is a warning, not a failure: the
@@ -388,14 +379,16 @@ def main(
     except OSError as exc:
         print(f"warning: could not save {ini.config_file_path}: {exc}", file=sys.stderr)
 
-    # Imported here so `--version` and a failed fetch do not pay for the
-    # terminal stack when this project is used only to inspect an index.
+    # Imported here so `--version` does not pay for the terminal stack when
+    # this project is used only to inspect an index.
     from pypi_cleanup_tui.tui import run_tui
 
     return run_tui(
         cleanup,
         ini=ini,
         zone=zone,
+        sort=sort,
+        packages=packages,
         theme=args.theme,
         no_color=args.no_color,
     )

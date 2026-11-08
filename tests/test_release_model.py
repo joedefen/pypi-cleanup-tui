@@ -208,38 +208,30 @@ def test_main_requires_a_package(capsys, config_path):
     assert 'at least one package name is required' in capsys.readouterr().err
 
 
-def test_main_reports_a_package_the_index_does_not_know(monkeypatch, capsys, config_path):
-    def missing(self):
-        raise LookupError('package missing')
+def test_main_leaves_the_fetch_to_the_tui(monkeypatch, config_path):
+    calls = []
+    monkeypatch.setattr(CleanupTui, 'fetch_versions',
+                        lambda self: calls.append(self.package))
+    seen = capture_tui(monkeypatch)
 
-    monkeypatch.setattr(CleanupTui, 'fetch_versions', missing)
+    assert cli.main(['demo'], config_path=config_path) == 0
 
-    assert cli.main(['demo'], config_path=config_path) == 1
-    assert 'error: package missing' in capsys.readouterr().err
-
-
-def test_main_reports_a_network_failure(monkeypatch, capsys, config_path):
-    def broken(self):
-        raise requests.ConnectionError('connection refused')
-
-    monkeypatch.setattr(CleanupTui, 'fetch_versions', broken)
-
-    assert cli.main(['demo'], config_path=config_path) == 1
-    assert 'could not fetch pypi.org/demo' in capsys.readouterr().err
+    cleanup, _ = seen[0]
+    assert cleanup.package == 'demo'
+    assert cleanup.versions == []
+    # The TUI owns the fetch; the command line must not block on the index.
+    assert calls == []
 
 
-def test_host_selects_the_index(monkeypatch, capsys, config_path):
-    def broken(self):
-        raise requests.ConnectionError('connection refused')
+def test_host_selects_the_index(monkeypatch, config_path):
+    seen = capture_tui(monkeypatch)
 
-    monkeypatch.setattr(CleanupTui, 'fetch_versions', broken)
+    assert cli.main(['demo', '--host', 'test'], config_path=config_path) == 0
 
-    assert cli.main(['demo', '--host', 'test'], config_path=config_path) == 1
-    assert 'could not fetch test.pypi.org/demo' in capsys.readouterr().err
+    assert seen[0][0].host_key == 'test'
 
 
 def test_main_launches_the_tui(monkeypatch, config_path):
-    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
     seen = capture_tui(monkeypatch)
 
     assert cli.main(['demo'], config_path=config_path) == 0
@@ -247,6 +239,8 @@ def test_main_launches_the_tui(monkeypatch, config_path):
     cleanup, kwargs = seen[0]
     assert cleanup.package == 'demo'
     assert kwargs['zone'] == UTC_MODE
+    assert kwargs['sort'] == SORT_BY_VERSION
+    assert kwargs['packages'] == ['demo']
     assert kwargs['ini'].vals.packages == 'demo'
 
 
@@ -308,13 +302,12 @@ def test_the_command_line_replaces_what_was_stored(monkeypatch, config_path):
 
 def test_the_stored_sort_and_zone_are_used_at_startup(monkeypatch, config_path):
     stored(config_path, sort=SORT_BY_DATE, zone=LOCAL_MODE)
-    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
     seen = capture_tui(monkeypatch)
 
     assert cli.main(['demo'], config_path=config_path) == 0
 
     cleanup, kwargs = seen[0]
-    assert cleanup.sort == SORT_BY_DATE
+    assert kwargs['sort'] == SORT_BY_DATE
     assert kwargs['zone'] == LOCAL_MODE
 
 
@@ -389,7 +382,7 @@ def test_a_hand_edited_config_falls_back_to_known_values(monkeypatch, config_pat
 
     cleanup, kwargs = seen[0]
     assert cleanup.host_key == 'pypi'
-    assert cleanup.sort == SORT_BY_VERSION
+    assert kwargs['sort'] == SORT_BY_VERSION
     assert kwargs['zone'] == UTC_MODE
     assert stored(config_path).vals.theme == ''
     assert stored(config_path).vals.no_color is False

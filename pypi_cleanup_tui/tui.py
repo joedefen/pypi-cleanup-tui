@@ -65,6 +65,8 @@ from console_window import (
 from console_window import help as help_text
 
 from pypi_cleanup_tui.main import (
+    HOST_PYPI,
+    HOST_TEST,
     LOCAL_MODE,
     MONO_THEME,
     SORT_BY_DATE,
@@ -74,7 +76,7 @@ from pypi_cleanup_tui.main import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
     from datetime import tzinfo
 
     from console_window.backend import RenderBackend
@@ -220,12 +222,26 @@ class CleanupApp:
         zone: str = UTC_MODE,
         theme: str | None = None,
         no_color: bool | None = None,
+        sort: str = SORT_BY_VERSION,
+        packages: Sequence[str] | None = None,
     ) -> None:
         self.cleanup = cleanup
         #: Optional persistent options.  Without one the TUI runs exactly as
         #: before: changes apply to this session and are not written anywhere.
         self.ini = ini
         self.running = True
+        #: The package list the command line supplied, shown one at a time.
+        #: ``p`` rotates through it; the model's package is the current entry.
+        self.packages = list(packages) if packages else [cleanup.package]
+        if cleanup.package not in self.packages:
+            self.packages.insert(0, cleanup.package)
+        self.package_index = self.packages.index(cleanup.package)
+        #: The order restored after every fetch, so a reload keeps the table
+        #: the way the user arranged it.
+        self.sort = sort
+        #: State for the frame drawn while :meth:`load_versions` fetches.
+        self.loading = False
+        self.load_failed = False
 
         # The color switch is process-wide, so it has to be settled before the
         # window installs a palette or the first frame is painted in the wrong
@@ -280,6 +296,12 @@ class CleanupApp:
         # that screen so the table keeps its own keys untouched.
         spin.add_key('theme_screen', 'T - themes', genre='action',
                      keys=[ord('T')], scope={MAIN_ST})
+        # p and h change what the table is looking at; the summary header
+        # already advertises both as key hints ([p]ack / [h]ost).
+        spin.add_key('package_next', 'p - next package', genre='action',
+                     keys=[ord('p')], scope={MAIN_ST})
+        spin.add_key('host_next', 'h - switch index', genre='action',
+                     keys=[ord('h')], scope={MAIN_ST})
         spin.add_key('escape', 'ESC - back', genre='action',
                      keys=[27], scope={HELP_ST, THEME_ST})
         spin.add_key('mark', 'x - mark this release, move down',
@@ -365,8 +387,49 @@ class CleanupApp:
         values.setdefault('host', self.cleanup.host_key)
         self.ini.save(**values)
 
+    def load_versions(self) -> None:
+        """Clear the table, show ``Loading ...``, then fetch and sort.
+
+        The failure path is a modal alert carrying the exception type and
+        text; the table is left empty so the user can pick another package
+        (``p``) or index (``h``) instead of losing the terminal.
+        """
+        self.loading = True
+        self.load_failed = False
+        self.cleanup.versions = []
+        self.win.pick_pos = 0
+        self.win.clear()
+        self._draw_current_screen()
+        self.win.render()
+        try:
+            self.cleanup.fetch_versions()
+        except Exception as exc:
+            # A lookup, network or JSON failure is the same to the user: show
+            # the details and let them choose another package or index.
+            self.load_failed = True
+            self.win.alert(
+                f'Could not load {self.cleanup.package!r} from '
+                f'{self.cleanup.host}.\n\n'
+                f'{type(exc).__name__}: {exc}',
+                title='LOAD ERROR',
+            )
+            return
+        finally:
+            self.loading = False
+            self.win.clear()
+        self.cleanup.sort_versions(self.sort)
+
+    def _draw_current_screen(self) -> None:
+        """Draw the screen on top, or the table before the first push."""
+        current = self.stack.curr
+        screen_num = current.num if current is not None else MAIN_ST
+        self.screens[screen_num].draw_screen()
+
     def main_loop(self) -> None:
-        """Draw the current screen until an action clears :attr:`running`."""
+        """Load the first history, then draw until an action clears running."""
+        # Entering the TUI before the fetch is what lets the loading frame and
+        # the failure alert use the real terminal.
+        self.load_versions()
         while self.running:
             self.screens[self.stack.curr.num].draw_screen()
             self.win.render()
@@ -433,8 +496,9 @@ class MainScreen(CleanupScreen):
         # The package summary.  A fancy header, so the bracketed letters read
         # as key hints, but not dimmed: it sits between the dim hint line and
         # the dim column titles.  ``User=`` is literal -- there is no key for
-        # it -- while ``[p]`` and ``[h]`` are placeholders for actions still to
-        # come.  The host shows the stored index key (``pypi`` or ``test``).
+        # it -- while ``[p]`` rotates the package list and ``[h]`` switches the
+        # index; either one reloads the table.  The host shows the index key
+        # (``pypi`` or ``test``), not its domain name.
         cleanup = self.app.cleanup
         summary = HeaderLine()
         summary.text(f'User={cleanup.user or "n/a"} ')
@@ -455,8 +519,21 @@ class MainScreen(CleanupScreen):
 
     def _draw_body(self) -> None:
         win = self.app.win
+        # The loading frame is drawn by load_versions(); it deliberately shows
+        # no releases, so the old package's rows cannot be mistaken for new.
+        if self.app.loading:
+            win.add_body(
+                'Loading ...',
+                attr=semantic_attr(Theme.HOTSWAP),
+                context=Context(genre='DECOR'),
+            )
+            return
         versions = self.app.cleanup.versions
         if not versions:
+            # A failed load is already explained by the alert; an empty body
+            # avoids claiming the history really has no releases.
+            if self.app.load_failed:
+                return
             win.add_body(
                 'No releases found.',
                 attr=curses.A_DIM,
@@ -553,6 +630,24 @@ class MainScreen(CleanupScreen):
     def theme_screen_ACTION(self) -> None:
         self.app.stack.push(THEME_ST, self.app.win.pick_pos)
 
+    def package_next_ACTION(self) -> None:
+        """Show the next package in the remembered list and reload it."""
+        app = self.app
+        if len(app.packages) < 2:
+            return
+        app.package_index = (app.package_index + 1) % len(app.packages)
+        app.cleanup.package = app.packages[app.package_index]
+        app.load_versions()
+
+    def host_next_ACTION(self) -> None:
+        """Switch between pypi.org and test.pypi.org and reload."""
+        cleanup = self.app.cleanup
+        cleanup.host_key = (
+            HOST_TEST if cleanup.host_key == HOST_PYPI else HOST_PYPI
+        )
+        self.app.persist(host=cleanup.host_key)
+        self.app.load_versions()
+
 
 class HelpScreen(CleanupScreen, BasicHelpScreen):
     """The key-help screen; ESC returns to the release table."""
@@ -599,6 +694,8 @@ def run_tui(
     zone: str = UTC_MODE,
     theme: str | None = None,
     no_color: bool | None = None,
+    sort: str = SORT_BY_VERSION,
+    packages: Sequence[str] | None = None,
 ) -> int:
     """Present *cleanup* in the terminal and return the process exit status."""
     return CleanupApp(
@@ -609,4 +706,6 @@ def run_tui(
         zone=zone,
         theme=theme,
         no_color=no_color,
+        sort=sort,
+        packages=packages,
     ).run()

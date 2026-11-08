@@ -80,7 +80,7 @@ def _mixed():
 
 
 def _app(cleanup=None, rows=20, cols=100, ini=None, zone=None,
-         theme=None, no_color=None):
+         theme=None, no_color=None, sort=None, packages=None):
     return tui_mod.CleanupApp(
         cleanup or _cleanup(),
         backend=HeadlessBackend(rows=rows, cols=cols),
@@ -89,6 +89,8 @@ def _app(cleanup=None, rows=20, cols=100, ini=None, zone=None,
         zone=zone or tui_mod.UTC_MODE,
         theme=theme,
         no_color=no_color,
+        sort=sort or SORT_BY_VERSION,
+        packages=packages,
     )
 
 
@@ -624,6 +626,179 @@ def test_mono_as_an_explicit_theme_turns_color_off():
     assert palette in Theme.list_all()
 
 
+# --- loading the release history ------------------------------------------
+
+def test_load_versions_clears_and_shows_a_loading_frame(monkeypatch):
+    cleanup = _cleanup()
+    app = _app(cleanup)
+    seen = []
+
+    def fake_fetch(self):
+        # What the body showed while the fetch was running: the old rows are
+        # gone and only the loading line is left.
+        seen.append((list(self.versions), list(app.win.body.texts)))
+        self.versions = [Release('3.0', NOW)]
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    try:
+        app.load_versions()
+
+        versions_at_fetch, body_at_fetch = seen[0]
+        assert versions_at_fetch == []
+        assert body_at_fetch == ['Loading ...']
+        assert [release.version for release in app.cleanup.versions] == ['3.0']
+        assert app.loading is False
+        assert app.load_failed is False
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_loading_line_uses_the_hotswap_role(monkeypatch):
+    sentinel = 0x6000
+    monkeypatch.setattr(tui_mod, 'semantic_attr', lambda role: sentinel)
+
+    app = _app()
+    try:
+        app.loading = True
+        _draw(app)
+
+        assert app.win.body.texts == ['Loading ...']
+        assert app.win.body.text_attrs[0][0][0] == sentinel
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_failed_load_alerts_and_leaves_the_body_empty(monkeypatch):
+    app = _app()
+    alerts = []
+
+    def broken(self):
+        raise LookupError("package 'demo' was not found on pypi.org")
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', broken)
+    monkeypatch.setattr(
+        app.win, 'alert',
+        lambda message, title='ALERT': alerts.append((message, title)),
+    )
+    try:
+        app.load_versions()
+
+        message, title = alerts[0]
+        assert title == 'LOAD ERROR'
+        assert 'not found' in message
+        assert 'LookupError' in message
+        assert app.cleanup.versions == []
+        assert app.load_failed is True
+
+        _draw(app)
+        assert app.win.body.row_cnt == 0
+    finally:
+        app.win.stop_curses()
+
+
+def test_run_tui_loads_the_history_after_it_opens(monkeypatch):
+    calls = []
+
+    def fake_fetch(self):
+        calls.append(self.package)
+        self.versions = [Release('1.0', NOW)]
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    backend = HeadlessBackend(rows=20, cols=100)
+    backend.queue_keys(ord('q'))
+
+    assert tui_mod.run_tui(_cleanup(), backend=backend, singleton=False) == 0
+    assert calls == ['demo']
+
+
+def test_p_rotates_the_packages_and_reloads(monkeypatch):
+    cleanup = CleanupTui('a', user='alice')
+    app = _app(cleanup, packages=['a', 'b'])
+    fetched = []
+
+    def fake_fetch(self):
+        fetched.append(self.package)
+        self.versions = [Release('1.0', NOW)]
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    try:
+        _press(app, ord('p'))
+        assert app.cleanup.package == 'b'
+        assert fetched == ['b']
+
+        _press(app, ord('p'))
+        assert app.cleanup.package == 'a'
+        assert fetched == ['b', 'a']
+    finally:
+        app.win.stop_curses()
+
+
+def test_p_with_one_package_does_not_reload(monkeypatch):
+    app = _app(CleanupTui('solo'), packages=['solo'])
+    fetched = []
+    monkeypatch.setattr(CleanupTui, 'fetch_versions',
+                        lambda self: fetched.append(self.package))
+    try:
+        _press(app, ord('p'))
+
+        assert app.cleanup.package == 'solo'
+        assert fetched == []
+    finally:
+        app.win.stop_curses()
+
+
+def test_h_switches_the_index_and_reloads(tmp_path, monkeypatch):
+    ini = _ini(tmp_path)
+    app = _app(CleanupTui('demo', host=tui_mod.HOST_PYPI), ini=ini)
+    fetched = []
+
+    def fake_fetch(self):
+        fetched.append(self.host_key)
+        self.versions = []
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    try:
+        _press(app, ord('h'))
+        assert app.cleanup.host_key == tui_mod.HOST_TEST
+        assert fetched == [tui_mod.HOST_TEST]
+        assert ini.vals.host == tui_mod.HOST_TEST
+
+        _press(app, ord('h'))
+        assert app.cleanup.host_key == tui_mod.HOST_PYPI
+        assert fetched == [tui_mod.HOST_TEST, tui_mod.HOST_PYPI]
+        assert ini.vals.host == tui_mod.HOST_PYPI
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_package_list_without_the_current_package_is_repaired():
+    app = _app(CleanupTui('b'), packages=['a'])
+    try:
+        assert app.packages == ['b', 'a']
+        assert app.package_index == 0
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_summary_follows_package_and_host_changes(monkeypatch):
+    app = _app(CleanupTui('a', user='alice'), packages=['a', 'b'])
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    try:
+        _press(app, ord('p'))
+        _draw(app)
+        assert app.win.head.texts[1] == 'User=alice pack=b host=pypi'
+
+        _press(app, ord('h'))
+        _draw(app)
+        assert app.win.head.texts[1] == 'User=alice pack=b host=test'
+    finally:
+        app.win.stop_curses()
+
+
 # --- the d placeholder ----------------------------------------------------
 
 def test_d_flashes_the_pending_deletion_count(monkeypatch):
@@ -775,6 +950,7 @@ def test_help_screen_lists_the_selection_and_zone_keys():
         for hint in ('x - mark this release', 'X - mark this release',
                      'u - unmark this release', 'U - unmark this release',
                      'z - date time zone', 's - change the sort order',
+                     'p - next package', 'h - switch index',
                      'd - delete the marked versions (TODO)'):
             assert hint in text
         assert tui_mod.UTC_MODE in text
@@ -834,7 +1010,8 @@ def test_q_quits_but_ctrl_c_is_ignored():
         app.win.stop_curses()
 
 
-def test_run_tui_draws_and_returns_after_q():
+def test_run_tui_draws_and_returns_after_q(monkeypatch):
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
     backend = HeadlessBackend(rows=20, cols=100)
     backend.queue_keys(ord('q'))
 
