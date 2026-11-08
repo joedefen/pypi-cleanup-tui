@@ -73,6 +73,13 @@ the link:
 
     ExecStart=%h/.local/bin/pypi-cleanup-tui
 
+## Running the source tree
+
+[`runner`](../runner) executes [`pypi_cleanup_tui/main.py`](../pypi_cleanup_tui/main.py) as `__main__`, so live edits are picked up immediately. In the checkout's `.venv`, use `.venv/bin/python ./runner`; the equivalent one-off is `python -m pypi_cleanup_tui.main`. It installs nothing and does not touch `~/.local/bin`.
+
+    ./runner package              # the interactive table
+    ./runner --host test package  # the same table, from test.pypi.org
+
 ## The test gate
 
 Build what the gate needs with `bt`, which puts the editable package plus the

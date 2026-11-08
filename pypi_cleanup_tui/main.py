@@ -373,7 +373,7 @@ def _build_parser(vals: SimpleNamespace) -> argparse.ArgumentParser:
     )
     packages_help = (
         "PyPI package names, either one comma separated list "
-        '("pack1,pack2") or separate arguments'
+        '("package1,package2") or separate arguments'
     )
     if vals.packages:
         packages_help += f" [dflt={vals.packages}]"
