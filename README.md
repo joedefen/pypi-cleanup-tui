@@ -46,11 +46,11 @@ The release table opens in the terminal:
 | `p` | show the next package in the list and reload |
 | `h` | switch between pypi.org and test.pypi.org and reload |
 | `x` | mark the picked release for deletion, then step down |
-| `X` | mark the picked release and every release below it, then step up |
+| `X` | mark the picked release and every release below it, then step up (unmarked row only) |
 | `u` | unmark the picked release, then step down |
-| `U` | unmark the picked release and every release below it, then step up |
+| `U` | unmark the picked release and every release below it, then step up (marked row only) |
 | `z` | switch the `DATE` column between UTC and the local time zone |
-| `s` | change the sort order (listed on the help screen only) |
+| `s` | change the sort order |
 | `d` | show the pending deletion count (placeholder; nothing is deleted yet) |
 
 The second header line summarises the run: `User=...`, `[p]ack=...` and
@@ -86,11 +86,24 @@ under it), and the `DATE` title names the zone in force, e.g. `DATE (UTC)` or
 title: `*VERSION` by default, or `*DATE (UTC)` after `s` switches to upload-date
 order.
 
-The hint line reads `X:mark▼` / `Unmark▼` for the "this row and everything
-below" keys, leads with `del` once at least one release is marked, and ends
-with the search field described above.  The theme key is listed on the help
-screen only.  Pressing `d` shows `To delete N versions [TODO]` in a two-second
-message box.  This is selection only: nothing is deleted yet.
+The first header line is made of space separated blocks, and a block that does
+not apply is blanked instead of removed, so its width never changes and the
+keys to its right never move:
+
+```text
+    x:mark X:mark▼ sort zone quit ?:help /     nothing marked, unmarked row
+del unmark Unmark▼ sort zone quit ?:help /     marked, pick on a marked row
+```
+
+The marking pair and the unmarking pair are the same width, and the row under
+the pick chooses between them: an unmarked row offers `x`/`X`, a marked row
+offers `u`/`U`.  `X` therefore only marks down from an unmarked row, and `U`
+only unmarks down from a marked row.  `del` leads the line once something is
+marked and no pattern is filtering the table -- a filter can hide marked
+releases, so `d` is inert while one is in force.  Pressing `d` shows
+`To delete N versions [TODO]` in a two-second message box.  The search field at
+the end is the one block whose width follows its text.  The theme key is listed
+on the help screen only.  This is selection only: nothing is deleted yet.
 
 The THEMES screen shows the palette names and their swatches.  Its last entry,
 `mono`, is not a palette: choosing it turns semantic color off, exactly like

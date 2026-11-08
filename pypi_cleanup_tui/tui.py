@@ -23,12 +23,19 @@ While anything is marked, the releases that will survive are painted in the
 marker stays legible) and dims the rest of the line.  The table therefore shows
 both what is kept and what goes.
 
+The hint line is built from fixed-width blocks: a block that does not apply is
+replaced by spaces of exactly the same width, so a key appearing or
+disappearing never shifts the keys to its right.  Which block is filled in
+follows the row under the pick -- an unmarked row offers ``x``/``X``, a marked
+one offers ``u``/``U`` instead -- and ``X`` and ``U`` are inert against a row
+already in the state they would produce.
+
 ``z`` cycles the time zone used by the ``DATE`` column between UTC and the
 machine's local zone; the ``DATE`` title names the zone in force.  ``s`` flips
-the table between version order and upload-date order -- it is listed on the
-help screen only -- and the sorted column carries a ``*`` before its title.
-Both settings are stored as soon as they change, so the next run opens the
-table the way this one left it; the help screen lists the saved options.
+the table between version order and upload-date order, and the sorted column
+carries a ``*`` before its title.  Both settings are stored as soon as they
+change, so the next run opens the table the way this one left it; the help
+screen lists the saved options.
 
 ``/`` opens an incremental search at the end of the hint line; the bare ``/``
 is always shown, even with an empty pattern.  The pattern is a case-insensitive
@@ -45,9 +52,10 @@ the hint line.  The app's ``mono`` choice is not a palette: it turns semantic
 color off, exactly like ``--no-color``, and the choice is remembered for the
 next run just like the other saved options.
 
-``d`` is advertised at the front of the hint line once anything is marked.  It
-is a placeholder for the deletion step: it reports the pending count in a short
-message box, because deletion itself is not wired up yet.
+``d`` is advertised at the front of the hint line once anything is marked and
+no pattern is in force: a filtered table can hide the releases a deletion would
+act on.  It is a placeholder for the deletion step -- it reports the pending
+count in a short message box, because deletion itself is not wired up yet.
 """
 
 from __future__ import annotations
@@ -115,6 +123,11 @@ DEL_MARK = "✘"
 #: this character as its ``alert_down`` glyph, so an ASCII terminal draws a
 #: plain ``v`` without any registration here.
 DOWN_MARK = "▼"
+
+#: The ``d`` block of the hint line: the word it spells while deletion is on
+#: offer.  The line reserves exactly this much room and blanks it otherwise, so
+#: the blocks to its right never move.
+DEL_HINT = "del"
 
 #: Column widths.  ``DATE`` is ``YYYY/MM/DD HH:MM`` (16 cells); ``DAYS`` is
 #: right-aligned because it is the only numeric column.
@@ -342,7 +355,8 @@ class CleanupApp:
                      'U - unmark this release and all below, move up',
                      genre='action', keys=[ord('U')], scope={MAIN_ST})
         # Placeholder for the deletion step: the hint only appears once
-        # something is marked, and pressing d reports the pending count.
+        # something is marked and no pattern is filtering the table, and
+        # pressing d reports the pending count.
         spin.add_key('delete', 'd - delete the marked versions (TODO)',
                      genre='action', keys=[ord('d')], scope={MAIN_ST})
         # A cycle, not an action: z rewrites the option in place and the next
@@ -356,7 +370,7 @@ class CleanupApp:
         spin.add_key('theme', 't - cycle themes', vals=list(THEME_CHOICES),
                      keys=[ord('t')], scope={THEME_ST})
         # Sorting changes the model rather than a spinner value, so it is an
-        # action; the help screen is the only place it is advertised.
+        # action; the hint line advertises it between the marking keys and z.
         spin.add_key('sort', 's - change the sort order',
                      genre='action', keys=[ord('s')], scope={MAIN_ST})
         # "/" opens the incremental search field in the first header line.
@@ -598,26 +612,50 @@ class MainScreen(CleanupScreen):
         """The ``D`` spinner's current value; UTC until the spinner is read."""
         return self.app.spin.get_value('time_zone') or UTC_MODE
 
-    def _draw_headers(self) -> None:
-        win = self.app.win
+    def _hint_line(self) -> HeaderLine:
+        """The first header line: one fixed-width block per key.
+
+        A block that has nothing to say is replaced by spaces of exactly the
+        same width, so keys appearing and disappearing never shift the keys to
+        their right.  The marking pair and the unmarking pair are already the
+        same width (``x:mark``/``unmark``, ``X:mark▼``/``Unmark▼``), which is
+        what lets the row under the pick choose between them without moving the
+        line.  The search field is the one block whose width follows its text;
+        it sits last, so even that moves nothing.
+        """
         hints = HeaderLine()
-        # Once something is marked, the deletion placeholder leads the line.
-        if self._marked_count():
-            hints.bracket_key('d').text('el ')
+        # The deletion placeholder leads the line, and only while it may fire:
+        # a pattern in force can hide marked releases, so d must not offer to
+        # delete what the screen does not show.
+        if self._deletion_offered():
+            hints.bracket_key('d').text(DEL_HINT[1:])
+        else:
+            hints.text(' ' * len(DEL_HINT))
+        hints.text(' ')
+        picked = self._release_at_pick()
+        if picked is not None and picked.delete:
+            # On a marked row the inverse pair applies; each key is inert
+            # against a row already in the state it would produce.
+            hints.bracket_key('u').text('nmark ')
+            hints.bracket_key('U').text(f'nmark{DOWN_MARK} ')
+        else:
+            hints.bracket_key('x').text(':mark ')
+            hints.bracket_key('X').text(f':mark{DOWN_MARK} ')
         # Where the label starts with the key itself, the bracket form merges
-        # into one word with the key underlined ("unmark", "zone", "quit").
-        # The from-here-down keys trade "-all" for the arrow glyph.
-        hints.bracket_key('x').text(':mark ')
-        hints.bracket_key('X').text(f':mark{DOWN_MARK} ')
-        hints.bracket_key('u').text('nmark ')
-        hints.bracket_key('U').text(f'nmark{DOWN_MARK} ')
+        # into one word with the key underlined ("sort", "zone", "quit").  The
+        # from-here-down keys trade "-all" for the arrow glyph.
+        hints.bracket_key('s').text('ort ')
         hints.bracket_key('z').text('one ')
         hints.bracket_key('q').text('uit ')
         hints.bracket_key('?').text(':help')
         # The search field is always present, even with an empty pattern; the
         # T key is advertised on the help screen only.
         hints.extend(self._search_header_line())
-        win.add_fancy_header(hints, line_attr=curses.A_DIM)
+        return hints
+
+    def _draw_headers(self) -> None:
+        win = self.app.win
+        win.add_fancy_header(self._hint_line(), line_attr=curses.A_DIM)
 
         # The package summary.  A fancy header, so the bracketed letters read
         # as key hints, but not dimmed: it sits between the dim hint line and
@@ -657,6 +695,28 @@ class MainScreen(CleanupScreen):
     def _marked_count(self) -> int:
         """How many releases are currently marked for deletion."""
         return sum(1 for release in self.app.cleanup.versions if release.delete)
+
+    def _deletion_offered(self) -> bool:
+        """Whether ``d`` may fire: something is marked and nothing is filtered.
+
+        A pattern in force can hide marked releases, so deleting behind it
+        would act on rows the screen does not show.  A pattern that does not
+        compile yet leaves the table unfiltered and so blocks nothing.
+        """
+        return self._marked_count() > 0 and self.app.search_re is None
+
+    def _release_at_pick(self) -> Release | None:
+        """The visible release under the pick, or ``None`` when there is none.
+
+        Unlike :meth:`_picked` this answers while the search bar is active: the
+        hint line describes the row the pick sits on, and the bar takes every
+        printable key before a selection action could fire anyway.
+        """
+        visible = self.app.visible_versions()
+        position = self.app.win.pick_pos
+        if 0 <= position < len(visible):
+            return visible[position]
+        return None
 
     def _draw_body(self) -> None:
         win = self.app.win
@@ -726,9 +786,14 @@ class MainScreen(CleanupScreen):
             self._pick_release(ctx.index + 1)
 
     def mark_from_here_ACTION(self) -> None:
-        """Mark the picked visible row and every visible row below it."""
+        """Mark the picked visible row and every visible row below it.
+
+        The hint line offers ``X`` on an unmarked row only: with the pick
+        already marked the gesture has nothing to add, and the line has swapped
+        in ``U`` for it, so a marked row leaves this key inert.
+        """
         ctx = self._picked()
-        if ctx is None:
+        if ctx is None or ctx.release.delete:
             return
         visible = self.app.visible_versions()
         for release in visible[ctx.index:]:
@@ -748,9 +813,13 @@ class MainScreen(CleanupScreen):
             self._pick_release(ctx.index + 1)
 
     def unmark_from_here_ACTION(self) -> None:
-        """Unmark the picked visible row and every visible row below it."""
+        """Unmark the picked visible row and every visible row below it.
+
+        The mirror of :meth:`mark_from_here_ACTION`: ``U`` is offered on a
+        marked row only, so an unmarked row leaves it inert.
+        """
         ctx = self._picked()
-        if ctx is None:
+        if ctx is None or not ctx.release.delete:
             return
         visible = self.app.visible_versions()
         for release in visible[ctx.index:]:
@@ -758,11 +827,16 @@ class MainScreen(CleanupScreen):
         self._pick_release(max(ctx.index - 1, 0))
 
     def delete_ACTION(self) -> None:
-        """Report the pending deletions; the real deletion is still a TODO."""
-        count = self._marked_count()
-        if not count:
+        """Report the pending deletions; the real deletion is still a TODO.
+
+        The key is inert whenever its hint block is blank -- nothing marked, or
+        a pattern filtering the table -- so a hidden release can never be swept
+        up by a deletion the user could not see coming.
+        """
+        if not self._deletion_offered():
             return
-        self.app.win.flash(f'To delete {count} versions [TODO]', duration=2.0)
+        self.app.win.flash(
+            f'To delete {self._marked_count()} versions [TODO]', duration=2.0)
 
     def sort_ACTION(self) -> None:
         """Flip the table between version order and upload-date order."""
@@ -818,6 +892,15 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
                 'against the version column; typing filters the table, ENTER '
                 'closes the pattern and ESC restores it. While a pattern is '
                 'closed, x, X, u and U act on the visible rows only.'
+            ),
+            (
+                'The hint line is context sensitive, and its blocks keep a '
+                'fixed width so keys never shift: on an unmarked row it offers '
+                'x and X, on a marked row u and U instead. X therefore only '
+                'marks down from an unmarked row, and U only unmarks down from '
+                'a marked row. del leads the line while something is marked '
+                'and no pattern is filtering the table; d then reports the '
+                'pending count and deletes nothing yet.'
             ),
         ]
         ini = self.app.ini

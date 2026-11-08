@@ -194,9 +194,11 @@ def test_main_screen_draws_three_header_lines_and_one_row_per_release():
         app.screens[tui_mod.MAIN_ST].draw_screen()
 
         assert app.win.head.row_cnt == 3
+        # The del block is blanked (three spaces) while nothing is marked, and
+        # the pick is on an unmarked row, so the marking pair is offered.
         assert app.win.head.texts[0] == (
-            f'x:mark X:mark{tui_mod.DOWN_MARK} unmark '
-            f'Unmark{tui_mod.DOWN_MARK} zone quit ?:help /')
+            f'    x:mark X:mark{tui_mod.DOWN_MARK} '
+            f'sort zone quit ?:help /')
         # The summary is a fancy header: [p] and [h] are key styled, User is
         # literal.  It is not dimmed, unlike the hint and column lines.
         assert app.win.head.texts[1] == 'User=alice pack=demo host=pypi'
@@ -206,6 +208,8 @@ def test_main_screen_draws_three_header_lines_and_one_row_per_release():
         assert 'Times' not in app.win.head.texts[1]
         assert 'Sort' not in app.win.head.texts[1]
         assert 'Releases' not in app.win.head.texts[1]
+        # s is advertised as one terse block, not as an "s - ..." description;
+        # that longer form belongs to the help screen.
         assert 's - ' not in app.win.head.texts[0]
 
         # The column titles are the third header line, dim and not underlined.
@@ -260,12 +264,53 @@ def test_the_del_hint_leads_the_line_only_while_something_is_marked():
     try:
         _draw(app)
         assert not app.win.head.texts[0].startswith('del ')
+        # The block is blanked rather than dropped: the same cells stay there
+        # so the keys after it never move.
+        assert app.win.head.texts[0].startswith(
+            ' ' * (len(tui_mod.DEL_HINT) + 1))
 
         cleanup.versions[0].delete = True
         app.win.clear()
         _draw(app)
 
         assert app.win.head.texts[0].startswith('del ')
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_hint_line_offers_the_unmarking_pair_on_a_marked_row():
+    cleanup = _cleanup3()
+    cleanup.versions[0].delete = True
+    app = _app(cleanup)
+    try:
+        _draw(app)
+
+        line = app.win.head.texts[0]
+        assert 'unmark ' in line
+        assert f'Unmark{tui_mod.DOWN_MARK} ' in line
+        assert 'x:mark' not in line
+        assert f'X:mark{tui_mod.DOWN_MARK}' not in line
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_hint_line_keeps_its_shape_as_the_pick_changes_state():
+    cleanup = _cleanup3()
+    app = _app(cleanup)
+    try:
+        _draw(app)
+        unmarked = app.win.head.texts[0]
+
+        cleanup.versions[0].delete = True
+        app.win.clear()
+        _draw(app)
+        marked = app.win.head.texts[0]
+
+        # The words swap, but the blocks keep their width: the keys to the
+        # right stay in the same columns.
+        assert unmarked.endswith('sort zone quit ?:help /')
+        assert marked.endswith('sort zone quit ?:help /')
+        assert len(unmarked) == len(marked)
     finally:
         app.win.stop_curses()
 
@@ -401,6 +446,40 @@ def test_shift_u_on_the_top_release_keeps_the_pick_on_that_row():
 
         assert all(not release.delete for release in cleanup.versions)
         assert app.win.pick_pos == 0
+    finally:
+        app.win.stop_curses()
+
+
+def test_shift_x_is_inert_on_a_row_that_is_already_marked():
+    cleanup = _cleanup3()
+    cleanup.versions[1].delete = True
+    app = _app(cleanup)
+    try:
+        _draw(app)
+        app.win.pick_pos = 1  # the marked 1.1 row, where the line offers U
+        _press(app, ord('X'))
+
+        assert [release.delete for release in cleanup.versions] == [
+            False, True, False]
+        assert app.win.pick_pos == 1
+    finally:
+        app.win.stop_curses()
+
+
+def test_shift_u_is_inert_on_a_row_that_is_not_marked():
+    cleanup = _cleanup3()
+    for release in cleanup.versions:
+        release.delete = True
+    cleanup.versions[1].delete = False
+    app = _app(cleanup)
+    try:
+        _draw(app)
+        app.win.pick_pos = 1  # the unmarked 1.1 row, where the line offers X
+        _press(app, ord('U'))
+
+        assert [release.delete for release in cleanup.versions] == [
+            True, False, True]
+        assert app.win.pick_pos == 1
     finally:
         app.win.stop_curses()
 
@@ -1073,6 +1152,68 @@ def test_d_does_nothing_when_nothing_is_marked(monkeypatch):
         _draw(app)
         monkeypatch.setattr(app.win, 'flash', lambda *args, **kwargs: calls.append(args))
 
+        _press(app, ord('d'))
+
+        assert calls == []
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_del_hint_waits_for_the_pattern_to_close():
+    cleanup = _cleanup3()
+    cleanup.versions[0].delete = True
+    app = _app(cleanup)
+    try:
+        _draw(app)
+        assert app.win.head.texts[0].startswith('del ')
+
+        _press(app, ord('/'))
+        _press(app, ord('1'))
+        _press(app, 10)
+        app.win.clear()
+        _draw(app)
+
+        # The filter can hide marked releases, so the block goes blank.
+        assert not app.win.head.texts[0].startswith('del ')
+        assert app.win.head.texts[0].startswith(
+            ' ' * (len(tui_mod.DEL_HINT) + 1))
+    finally:
+        app.win.stop_curses()
+
+
+def test_escape_clears_the_pattern_and_brings_the_del_hint_back():
+    cleanup = _cleanup3()
+    cleanup.versions[0].delete = True
+    app = _app(cleanup)
+    try:
+        _draw(app)
+        _press(app, ord('/'))
+        _press(app, ord('1'))
+        _press(app, 27)  # ESC restores the empty pattern the search started with
+
+        assert app.search_text == ''
+        app.win.clear()
+        _draw(app)
+
+        assert app.win.head.texts[0].startswith('del ')
+    finally:
+        app.win.stop_curses()
+
+
+def test_d_is_inert_while_a_pattern_is_in_force(monkeypatch):
+    cleanup = _cleanup3()
+    cleanup.versions[0].delete = True
+    app = _app(cleanup)
+    calls = []
+    try:
+        _draw(app)
+        monkeypatch.setattr(app.win, 'flash',
+                            lambda *args, **kwargs: calls.append(args))
+        _press(app, ord('/'))
+        _press(app, ord('1'))
+        _press(app, 10)
+
+        # 2.0 is marked but the pattern '1' hides it: d must not offer it.
         _press(app, ord('d'))
 
         assert calls == []
