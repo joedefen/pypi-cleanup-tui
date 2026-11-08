@@ -56,6 +56,18 @@ next run just like the other saved options.
 no pattern is in force: a filtered table can hide the releases a deletion would
 act on.  It is a placeholder for the deletion step -- it reports the pending
 count in a short message box, because deletion itself is not wired up yet.
+
+``P`` opens the working package list.  Every row carries a check mark once this
+run has loaded the package, its name, how many versions the history held, and
+how many versions this run has deleted; both numbers show ``-`` until the
+package is loaded.  The pick starts on the package ``p`` would show next, so
+``ESC`` -- which opens the picked package in the table and returns -- is one
+keypress from the table's package to the next one; with the list emptied there
+is nothing to open, so ``ESC`` leaves the program instead.  ``x`` removes the
+name from the list (the index keeps it), and ``?`` opens the help screen, whose
+``ESC`` returns to the list.  The list is what the command line remembers, and
+package arguments are cumulative: a run's names go in front of the stored ones
+with duplicates dropped, keeping the first.
 """
 
 from __future__ import annotations
@@ -63,6 +75,7 @@ from __future__ import annotations
 import curses
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -107,7 +120,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 MAIN_ST = 0
 HELP_ST = 1
 THEME_ST = 2
-SCREEN_NAMES = ("MAIN", "HELP", "THEMES")
+PACKAGES_ST = 3
+SCREEN_NAMES = ("MAIN", "HELP", "THEMES", "PACKAGES")
 
 #: Every choice the picker cycles through.  ``mono`` is the app's pseudo-theme,
 #: not a console-window palette; keeping it last makes ``t`` step from the final
@@ -118,6 +132,11 @@ THEME_CHOICES = (*Theme.list_all(), MONO_THEME)
 #: declared to the window as a glyph, so a terminal without the character draws
 #: a plain ``x`` instead of losing the meaning of the column.
 DEL_MARK = "✘"
+
+#: Marker drawn in the untitled first column of the package list once this run
+#: has loaded the package.  Declared as a glyph like DEL_MARK, so an ASCII
+#: terminal draws a plain ``x`` instead of losing the column's meaning.
+VISITED_MARK = "✓"
 
 #: The "from here down" arrow in the hint line.  console-window already owns
 #: this character as its ``alert_down`` glyph, so an ASCII terminal draws a
@@ -135,6 +154,16 @@ DEL_WIDTH = 3
 DATE_WIDTH = 16
 DAYS_WIDTH = 5
 VERSION_GAP = 2
+
+#: The package list's untitled check column and its two numeric columns.
+CHECK_WIDTH = 1
+VERS_WIDTH = 5
+DELS_WIDTH = 5
+PACKAGE_TITLE = "PACKAGE"
+
+#: The word the package list puts at the start of its first header line, so the
+#: screen names itself before listing the keys it accepts.
+PACKAGES_TITLE = "PACKAGES"
 
 
 def days_ago(release: Release, now: datetime | None = None) -> int:
@@ -198,6 +227,57 @@ def column_header(mode: str = UTC_MODE, sort: str = SORT_BY_VERSION,
     )
 
 
+@dataclass
+class PackageSession:
+    """What this run has learned about one package in the working list.
+
+    The package list draws from this ledger rather than from the model, so a
+    package the run has not loaded cannot pretend to know its version count.
+    ``deleted`` is waiting for the deletion step: it stays zero until a real
+    deletion adds to it, which is why a visited package shows ``0`` rather than
+    a made-up total.
+    """
+
+    #: True once :meth:`CleanupApp.load_versions` fetched this package.
+    visited: bool = False
+    #: Releases the history held at the last successful load.
+    versions: int = 0
+    #: Versions removed from this package during this run.
+    deleted: int = 0
+
+
+def package_width(packages: Sequence[str]) -> int:
+    """The PACKAGE column width: the longest name, but never under the title."""
+    return max([len(PACKAGE_TITLE), *(len(name) for name in packages)])
+
+
+def package_header(width: int) -> str:
+    """The package list's column titles; the check column stays untitled."""
+    return (
+        f"{' ' * (CHECK_WIDTH + 1)}"
+        f"{PACKAGE_TITLE:<{width}} "
+        f"{'VERs':>{VERS_WIDTH}} "
+        f"{'DELs':>{DELS_WIDTH}}"
+    )
+
+
+def format_package_row(name: str, session: PackageSession, width: int) -> str:
+    """Format one package-list row: check mark, name, version and delete totals.
+
+    An unvisited package shows a blank check cell and ``-`` in both number
+    columns: the screen must not suggest a count the run never fetched.
+    """
+    mark = VISITED_MARK if session.visited else ' '
+    versions = str(session.versions) if session.visited else '-'
+    deleted = str(session.deleted) if session.visited else '-'
+    return (
+        f"{mark:^{CHECK_WIDTH}} "
+        f"{name:<{width}} "
+        f"{versions:>{VERS_WIDTH}} "
+        f"{deleted:>{DELS_WIDTH}}"
+    )
+
+
 def resolve_theme(
     cli_theme: str | None = None,
     cli_no_color: bool | None = None,
@@ -256,11 +336,25 @@ class CleanupApp:
         self.ini = ini
         self.running = True
         #: The package list the command line supplied, shown one at a time.
-        #: ``p`` rotates through it; the model's package is the current entry.
-        self.packages = list(packages) if packages else [cleanup.package]
+        #: ``p`` rotates through it and ``P`` edits it; the model's package is
+        #: the current entry.  De-duplication keeps the first occurrence, the
+        #: same rule the command line applies to its own list.
+        self.packages = (
+            list(dict.fromkeys(packages)) if packages else [cleanup.package]
+        )
         if cleanup.package not in self.packages:
             self.packages.insert(0, cleanup.package)
         self.package_index = self.packages.index(cleanup.package)
+        #: This run's ledger per package: loaded or not, its version count and
+        #: how many versions were deleted from it.  Kept on the application,
+        #: not in the options file, because it describes only this session.
+        self.session: dict[str, PackageSession] = {}
+        #: The row the package list should put the pick on the next time it
+        #: draws.  ``P`` sets it to the package ``p`` would show next, so the
+        #: list opens one rotation step ahead of the table; the draw that
+        #: follows consumes it, because a row only exists once the body is
+        #: built.
+        self.packages_pick: int | None = None
         #: The order restored after every fetch, so a reload keeps the table
         #: the way the user arranged it.
         self.sort = sort
@@ -315,9 +409,12 @@ class CleanupApp:
             # Seed the palette explicitly so the window does not inherit one
             # left behind by a previous run in the same process.
             theme=palette,
-            # The deletion marker is decoration, so the window owns its ASCII
-            # fallback and rewrites it when the terminal cannot draw it.
-            glyphs={'delete_mark': Glyph(DEL_MARK, 'x')},
+            # Both markers are decoration, so the window owns their ASCII
+            # fallbacks and rewrites them when the terminal cannot draw them.
+            glyphs={
+                'delete_mark': Glyph(DEL_MARK, 'x'),
+                'visited_mark': Glyph(VISITED_MARK, 'x'),
+            },
         )
         self.win = ConsoleWindow(opts=win_opts, backend=backend, singleton=singleton)
 
@@ -325,25 +422,36 @@ class CleanupApp:
             MAIN_ST: MainScreen(self),
             HELP_ST: HelpScreen(self),
             THEME_ST: ThemeScreen(self),
+            PACKAGES_ST: PackagesScreen(self),
         }
         self.stack = ScreenStack(self.win, self.opts, SCREEN_NAMES, screens)
 
         spin = self.spin = OptionSpinner(stack=self.stack)
         spin.add_key('quit', 'q - quit', genre='action', keys=[ord('q')])
         spin.add_key('help_screen', '? - help', genre='action',
-                     keys=[ord('?')], scope={MAIN_ST})
+                     keys=[ord('?')], scope={MAIN_ST, PACKAGES_ST})
         # T opens the picker; it is the only way in, and t is bound only on
         # that screen so the table keeps its own keys untouched.
         spin.add_key('theme_screen', 'T - themes', genre='action',
                      keys=[ord('T')], scope={MAIN_ST})
+        # P opens the working package list, which is a different view of the
+        # same list p rotates through: p steps the table to the next package,
+        # P edits the list itself.
+        spin.add_key('packages_screen', 'P - package list', genre='action',
+                     keys=[ord('P')], scope={MAIN_ST})
         # p and h change what the table is looking at; the summary header
         # already advertises both as key hints ([p]ack / [h]ost).
         spin.add_key('package_next', 'p - next package', genre='action',
                      keys=[ord('p')], scope={MAIN_ST})
         spin.add_key('host_next', 'h - switch index', genre='action',
                      keys=[ord('h')], scope={MAIN_ST})
-        spin.add_key('escape', 'ESC - back', genre='action',
-                     keys=[27], scope={HELP_ST, THEME_ST})
+        # ESC is the way back on every pushed screen, but it is the way
+        # forward on the package list: there it opens the picked package
+        # before returning, which is why one binding is enough -- each screen
+        # decides what its own ESC means.
+        spin.add_key('escape', 'ESC - back, or open the picked package',
+                     genre='action',
+                     keys=[27], scope={HELP_ST, THEME_ST, PACKAGES_ST})
         spin.add_key('mark', 'x - mark this release, move down',
                      genre='action', keys=[ord('x')], scope={MAIN_ST})
         spin.add_key('mark_from_here',
@@ -376,9 +484,12 @@ class CleanupApp:
         # "/" opens the incremental search field in the first header line.
         spin.add_key('search', '/ - incremental search',
                      genre='action', keys=[ord('/')], scope={MAIN_ST})
-        # ENTER is not an action of its own, but the search bar must receive
-        # it to close the pattern (and to accept the text), so it is forwarded
-        # to the application even though only the bar consumes it.
+        # The package list's row key.  It is scoped to that screen, so x there
+        # removes a name while x on the table still marks a release.
+        spin.add_key('package_remove', 'x - remove from the package list',
+                     genre='action', keys=[ord('x')], scope={PACKAGES_ST})
+        # ENTER is how the search bar closes its pattern on the table, so it
+        # has to reach the application even though no spinner option binds it.
         self.win.set_handled_keys(
             set(spin.keys) | {10, 13, curses.KEY_ENTER},
         )
@@ -523,6 +634,64 @@ class CleanupApp:
         values.setdefault('host', self.cleanup.host_key)
         self.ini.save(**values)
 
+    def package_session(self, package: str) -> PackageSession:
+        """This run's ledger for *package*, created empty on first look."""
+        return self.session.setdefault(package, PackageSession())
+
+    def note_loaded(self) -> None:
+        """Record that the current package's history has just been fetched."""
+        session = self.package_session(self.cleanup.package)
+        session.visited = True
+        session.versions = len(self.cleanup.versions)
+
+    def select_package(self, package: str) -> None:
+        """Make *package* the table's package without fetching it.
+
+        The package list only offers names it holds, so a name that is not in
+        the list is ignored rather than added behind the user's back.
+        """
+        if package not in self.packages:
+            return
+        self.package_index = self.packages.index(package)
+        self.cleanup.package = package
+
+    def remove_package(self, package: str) -> None:
+        """Drop *package* from the working list, leaving the index untouched.
+
+        Removing the package the table shows is allowed: the list is a working
+        set, not the index, so the table keeps its package.  The rotation index
+        is repaired to the current package when it is still listed, or to the
+        row that took the removed name's place.  The new list is stored, so the
+        next run does not bring the name back.
+        """
+        if package not in self.packages:
+            return
+        self.packages.remove(package)
+        if self.cleanup.package in self.packages:
+            self.package_index = self.packages.index(self.cleanup.package)
+        elif self.packages:
+            self.package_index = min(self.package_index, len(self.packages) - 1)
+        else:
+            self.package_index = 0
+        self.persist(packages=','.join(self.packages))
+
+    def next_package_index(self) -> int | None:
+        """The row after the table's package, wrapping to the first one.
+
+        The next package is found from the table's own package rather than
+        from the stored index, so the rotation stays correct after a name was
+        removed from the list while the table was showing a different one.
+        A name the list no longer holds falls back to the row that took its
+        place, which is how ``p`` still switches away from a removed package.
+        ``None`` means there is no row to step onto because the list is empty.
+        """
+        if not self.packages:
+            return None
+        if self.cleanup.package in self.packages:
+            index = self.packages.index(self.cleanup.package)
+            return (index + 1) % len(self.packages)
+        return min(self.package_index, len(self.packages) - 1)
+
     def load_versions(self) -> None:
         """Clear the table, show ``Loading ...``, then fetch and sort.
 
@@ -554,6 +723,9 @@ class CleanupApp:
             self.loading = False
             self.win.clear()
         self.cleanup.sort_versions(self.sort)
+        # Only a successful fetch makes the package visited: a failed one has
+        # no version count, and the package list must not invent a zero.
+        self.note_loaded()
 
     def _draw_current_screen(self) -> None:
         """Draw the screen on top, or the table before the first push."""
@@ -595,6 +767,10 @@ class CleanupScreen(Screen):
     def escape_ACTION(self) -> None:
         """A pushed screen hands control back to the one below it."""
         self.app.stack.pop()
+
+    def help_screen_ACTION(self) -> None:
+        """Push the help screen, remembering the pick to return to."""
+        self.app.stack.push(HELP_ST, self.app.win.pick_pos)
 
 
 class MainScreen(CleanupScreen):
@@ -850,19 +1026,27 @@ class MainScreen(CleanupScreen):
         """Open the incremental search bar at the end of the hint line."""
         self.app.start_search()
 
-    def help_screen_ACTION(self) -> None:
-        self.app.stack.push(HELP_ST, self.app.win.pick_pos)
-
     def theme_screen_ACTION(self) -> None:
         self.app.stack.push(THEME_ST, self.app.win.pick_pos)
 
-    def package_next_ACTION(self) -> None:
-        """Show the next package in the remembered list and reload it."""
+    def packages_screen_ACTION(self) -> None:
+        """Open the working package list, ready to open the next package."""
         app = self.app
-        if len(app.packages) < 2:
+        app.packages_pick = app.next_package_index()
+        app.stack.push(PACKAGES_ST, app.win.pick_pos)
+
+    def package_next_ACTION(self) -> None:
+        """Show the next package in the remembered list and reload it.
+
+        A list holding only the current package has no next package, which
+        keeps ``p`` from reloading what is already on screen.
+        """
+        app = self.app
+        next_index = app.next_package_index()
+        if next_index is None or app.packages[next_index] == app.cleanup.package:
             return
-        app.package_index = (app.package_index + 1) % len(app.packages)
-        app.cleanup.package = app.packages[app.package_index]
+        app.package_index = next_index
+        app.cleanup.package = app.packages[next_index]
         app.load_versions()
 
     def host_next_ACTION(self) -> None:
@@ -876,7 +1060,7 @@ class MainScreen(CleanupScreen):
 
 
 class HelpScreen(CleanupScreen, BasicHelpScreen):
-    """The key-help screen; ESC returns to the release table."""
+    """The key-help screen; ESC returns to the screen that opened it."""
 
     def extra_help_paragraphs(self) -> Iterable[str]:
         """Explain the search and theme picker, then list the saved options."""
@@ -902,6 +1086,20 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
                 'and no pattern is filtering the table; d then reports the '
                 'pending count and deletes nothing yet.'
             ),
+            (
+                'P opens the working package list. Each row shows a check '
+                'mark once this run has loaded that package, its name, the '
+                'number of versions the history held, and how many versions '
+                'this run has deleted; both numbers show a dash until the '
+                'package is loaded. The pick starts on the package p would '
+                'show next, so ESC -- which opens the picked package in the '
+                'table and returns -- is one keypress from the table to the '
+                'next package, and ESC leaves the program when the list is '
+                'empty. x removes the picked name without touching the index, '
+                'and ? returns to this screen when it is dismissed. Package '
+                'arguments are cumulative: a run puts its names in front of '
+                'the remembered list, and a name both hold appears once.'
+            ),
         ]
         ini = self.app.ini
         if ini is not None:
@@ -910,6 +1108,107 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
             )
             paragraphs.append(f'Saved options ({ini.config_file_path}): {stored}')
         return tuple(paragraphs)
+
+
+class PackagesScreen(CleanupScreen):
+    """The working package list, with this session's totals beside each name.
+
+    The list is what ``p`` rotates through and what the command line remembers;
+    removing a name here never touches the index itself.  ``ESC`` opens the
+    picked package in the table and returns -- the pick starts on the package
+    ``p`` would show next, so the two keys agree -- ``x`` removes the picked
+    name from the list, and ``?`` opens the help screen (whose ``ESC`` returns
+    here, because the screen stack remembers who pushed it).  With the list
+    emptied there is nothing to open, so ``ESC`` leaves the program rather than
+    returning to a table whose package list is empty.
+    """
+
+    def draw_screen(self) -> None:
+        win = self.app.win
+        win.set_pick_mode(True, 1)
+        width = package_width(self.app.packages)
+        win.add_fancy_header(self._hint_line(), line_attr=curses.A_DIM)
+        win.add_header(package_header(width), attr=curses.A_DIM)
+        self._draw_body(width)
+        self._place_pick()
+
+    def _place_pick(self) -> None:
+        """Consume the pending start row, scrolling it into view.
+
+        ``P`` names the row the pick should start on, but a row only exists
+        once the body has been built, so the placement waits for the draw.
+        """
+        start = self.app.packages_pick
+        if start is None:
+            return
+        self.app.packages_pick = None
+        win = self.app.win
+        win.pick_pos = start
+        win.scroll_pos = 0
+        # fix_positions() clamps the row to the body and scrolls the viewport
+        # down when the start row is below the fold.
+        win.fix_positions()
+
+    @staticmethod
+    def _hint_line() -> HeaderLine:
+        """The screen's name, then one block per key available here."""
+        hints = HeaderLine()
+        hints.label(PACKAGES_TITLE).text('  ')
+        hints.bracket_key('x').text(':remove ')
+        hints.bracket_key('ESC').text(':open ')
+        hints.bracket_key('?').text(':help')
+        return hints
+
+    def _draw_body(self, width: int) -> None:
+        win = self.app.win
+        if not self.app.packages:
+            win.add_body(
+                'No packages in the list.',
+                attr=curses.A_DIM,
+                context=Context(genre='DECOR'),
+            )
+            return
+        for name in self.app.packages:
+            row = format_package_row(name, self.app.package_session(name), width)
+            win.add_body(row, context=Context(genre='item', package=name))
+
+    def _picked_package(self) -> str | None:
+        """The package under the pick, or ``None`` off the rows."""
+        ctx = self.app.win.get_picked_context()
+        if ctx is None or not hasattr(ctx, 'package'):
+            return None
+        return ctx.package
+
+    def escape_ACTION(self) -> None:
+        """Open the picked package in the table, or leave when there is none.
+
+        There is no "return without switching" on this screen: the pick starts
+        on the next package, so ESC is the way to switch, and a table that
+        already shows the picked package needs no second fetch.  An emptied
+        list has no row to open, which is the only case that leaves the
+        program.
+        """
+        app = self.app
+        package = self._picked_package()
+        if package is None:
+            app.running = False
+            return
+        changed = package != app.cleanup.package
+        app.select_package(package)
+        # Pop first: load_versions() draws the current screen while it fetches,
+        # and the loading frame must land on the table, not on this list.
+        app.stack.pop()
+        if changed:
+            app.load_versions()
+
+    def package_remove_ACTION(self) -> None:
+        """Remove the picked name from the list, keeping the pick on a row."""
+        package = self._picked_package()
+        if package is None:
+            return
+        self.app.remove_package(package)
+        count = len(self.app.packages)
+        self.app.win.pick_pos = min(self.app.win.pick_pos, count - 1) if count else 0
 
 
 class ThemeScreen(Theme.create_picker_screen(CleanupScreen, cycle_key='t')):

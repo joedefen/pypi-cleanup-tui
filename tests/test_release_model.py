@@ -289,15 +289,33 @@ def test_a_later_run_needs_no_arguments(monkeypatch, config_path):
     assert cleanup.host_key == 'test'
 
 
-def test_the_command_line_replaces_what_was_stored(monkeypatch, config_path):
+def test_the_command_line_is_cumulative(monkeypatch, config_path):
     stored(config_path, user='alice', host='test', packages='old1,old2')
     monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
     seen = capture_tui(monkeypatch)
 
     assert cli.main(['new'], config_path=config_path) == 0
 
-    assert stored(config_path).vals.packages == 'new'
+    # This run's name goes in front; the remembered list follows it, and the
+    # table still opens the first name.
+    assert stored(config_path).vals.packages == 'new,old1,old2'
     assert seen[0][0].package == 'new'
+    assert seen[0][1]['packages'] == ['new', 'old1', 'old2']
+
+
+def test_a_name_both_lists_hold_keeps_its_first_position(monkeypatch, config_path):
+    stored(config_path, packages='a,b,c')
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['c', 'd', 'a'], config_path=config_path) == 0
+
+    assert seen[0][1]['packages'] == ['c', 'd', 'a', 'b']
+    assert stored(config_path).vals.packages == 'c,d,a,b'
+
+
+def test_merge_packages_keeps_the_first_of_a_duplicate():
+    assert cli.merge_packages('a,b', 'b,c') == ['a', 'b', 'c']
 
 
 def test_the_stored_sort_and_zone_are_used_at_startup(monkeypatch, config_path):

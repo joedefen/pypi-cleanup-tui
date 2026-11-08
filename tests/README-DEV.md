@@ -12,8 +12,8 @@ assume the repository root, which is where the gate has to be run.
 | Path | Owns |
 | --- | --- |
 | [`pypi_cleanup_tui/__init__.py`](../pypi_cleanup_tui/__init__.py) | `__version__`, and nothing else. The build backend reads it, `pypi-cleanup-tui --version` prints it, and `bless` reads the line without importing the package. |
-| [`pypi_cleanup_tui/main.py`](../pypi_cleanup_tui/main.py) | The release-history model (`Release`, `CleanupTui`) and the command-line entry point. Deletion is still a future step. |
-| [`pypi_cleanup_tui/tui.py`](../pypi_cleanup_tui/tui.py) | The interactive console-window interface: three header lines (context-sensitive key hints, the package summary, the column titles), the DEL/DATE/DAYS/VERSION table, the help screen, and the quit/help actions. |
+| [`pypi_cleanup_tui/main.py`](../pypi_cleanup_tui/main.py) | The release-history model (`Release`, `CleanupTui`) and the command-line entry point, including the cumulative package list (this run's names in front of the remembered ones). Deletion is still a future step. |
+| [`pypi_cleanup_tui/tui.py`](../pypi_cleanup_tui/tui.py) | The interactive console-window interface: three header lines (context-sensitive key hints, the package summary, the column titles), the DEL/DATE/DAYS/VERSION table, the package list (check mark, PACKAGE, VERs, DELs), the help screen, the theme picker, and the quit/help actions. |
 | [`runner`](../runner) | The development launcher: runs `pypi_cleanup_tui.main` from this checkout as `__main__`, without installing anything and without claiming `~/.local/bin`. |
 | [`pyproject.toml`](../pyproject.toml) | Name, description, keywords, `requires-python`, runtime dependencies, the `dev` extra, and the pytest, coverage, ruff and `[tool.bless]` configuration. |
 | [`bless`](../bless) | The release gate, emitted verbatim from [`../../blessd/bless`](../../blessd/bless) by that repository's `build.py`. It holds no copy of this project's identity, and it is never edited here. |

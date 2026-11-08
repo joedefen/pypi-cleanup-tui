@@ -105,6 +105,13 @@ def _draw(app):
     return app
 
 
+def _draw_packages(app):
+    """Draw the package list on a clean window, so its rows become pickable."""
+    app.win.clear()
+    app.screens[tui_mod.PACKAGES_ST].draw_screen()
+    return app
+
+
 def _press(app, key):
     """Deliver one key exactly as the run loop does: bind, then dispatch."""
     app.handle_key(key)
@@ -1108,6 +1115,29 @@ def test_a_package_list_without_the_current_package_is_repaired():
         app.win.stop_curses()
 
 
+def test_the_next_package_of_an_empty_list_is_none():
+    app = _app(CleanupTui('a'), packages=['a'])
+    try:
+        app.packages.clear()
+
+        assert app.next_package_index() is None
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_next_package_falls_back_to_the_row_that_took_its_place():
+    app = _app(CleanupTui('a'), packages=['a', 'b', 'c'])
+    try:
+        app.remove_package('a')
+
+        # The table still shows 'a', which the list no longer holds, so the
+        # row that took its place ('b') is what p and P step onto.
+        assert app.packages == ['b', 'c']
+        assert app.next_package_index() == 0
+    finally:
+        app.win.stop_curses()
+
+
 def test_the_summary_follows_package_and_host_changes(monkeypatch):
     app = _app(CleanupTui('a', user='alice'), packages=['a', 'b'])
     monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
@@ -1119,6 +1149,253 @@ def test_the_summary_follows_package_and_host_changes(monkeypatch):
         _press(app, ord('h'))
         _draw(app)
         assert app.win.head.texts[1] == 'User=alice pack=b host=test'
+    finally:
+        app.win.stop_curses()
+
+
+# --- the package list -----------------------------------------------------
+
+def test_package_header_leaves_the_check_column_untitled():
+    header = tui_mod.package_header(7)
+
+    assert header == '  PACKAGE  VERs  DELs'
+    assert header.startswith(' ' * (tui_mod.CHECK_WIDTH + 1))
+
+
+def test_format_package_row_uses_dashes_until_the_package_is_loaded():
+    fresh = tui_mod.PackageSession()
+    loaded = tui_mod.PackageSession(visited=True, versions=12, deleted=3)
+
+    assert tui_mod.format_package_row('demo', fresh, 7) == (
+        '  demo' + ' ' * 8 + '-' + ' ' * 5 + '-')
+    assert tui_mod.format_package_row('demo', loaded, 7) == (
+        f'{tui_mod.VISITED_MARK} demo' + ' ' * 7 + '12' + ' ' * 5 + '3')
+
+
+def test_a_successful_load_marks_the_package_visited(monkeypatch):
+    app = _app(CleanupTui('demo'))
+
+    def fake_fetch(self):
+        self.versions = [Release('2.0', NOW), Release('1.0', NOW)]
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    try:
+        app.load_versions()
+
+        session = app.session['demo']
+        assert (session.visited, session.versions, session.deleted) == (True, 2, 0)
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_failed_load_leaves_the_package_unvisited(monkeypatch):
+    def fail(self):
+        raise LookupError('not found')
+
+    app = _app(CleanupTui('demo'))
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fail)
+    monkeypatch.setattr(app.win, 'alert', lambda *args, **kwargs: None)
+    try:
+        app.load_versions()
+
+        assert 'demo' not in app.session
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_package_list_shows_checks_and_the_session_totals(monkeypatch):
+    cleanup = CleanupTui('a', user='alice')
+    app = _app(cleanup, packages=['a', 'b'])
+    versions = {
+        'a': [Release('2.0', NOW), Release('1.0', NOW)],
+        'b': [Release('3.0', NOW)],
+    }
+
+    def fake_fetch(self):
+        self.versions = list(versions[self.package])
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    try:
+        app.load_versions()            # the table's package, 'a', is loaded
+        _press(app, ord('P'))
+
+        assert app.stack.curr.num == tui_mod.PACKAGES_ST
+        app.win.clear()
+        app.screens[tui_mod.PACKAGES_ST].draw_screen()
+
+        assert app.win.head.texts[0] == 'PACKAGES  x:remove ESC:open ?:help'
+        assert app.win.head.texts[1] == tui_mod.package_header(7)
+        assert app.win.body.row_cnt == 2
+        # 'a' was loaded: check mark, name and its version total.
+        assert app.win.body.texts[0].startswith(tui_mod.VISITED_MARK)
+        assert app.win.body.texts[0] == (
+            f'{tui_mod.VISITED_MARK} a' + ' ' * 11 + '2' + ' ' * 5 + '0')
+        # 'b' was never fetched: no check mark and two dashes.
+        assert app.win.body.texts[1] == '  b' + ' ' * 11 + '-' + ' ' * 5 + '-'
+    finally:
+        app.win.stop_curses()
+
+
+def test_escape_opens_the_picked_package_and_returns_to_the_table(monkeypatch):
+    app = _app(CleanupTui('a'), packages=['a', 'b'])
+    fetched = []
+
+    def fake_fetch(self):
+        fetched.append(self.package)
+        self.versions = [Release('1.0', NOW)]
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    try:
+        app.load_versions()
+        _press(app, ord('P'))
+        _draw_packages(app)
+
+        # P parks the pick on the package p would show next; ESC opens it.
+        assert app.win.pick_pos == 1
+        _press(app, 27)
+
+        assert app.stack.curr.num == tui_mod.MAIN_ST
+        assert app.cleanup.package == 'b'
+        assert app.package_index == 1
+        assert fetched == ['a', 'b']
+        assert app.session['b'].versions == 1
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_package_list_starts_on_the_package_p_would_show(monkeypatch):
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    app = _app(CleanupTui('c'), packages=['a', 'b', 'c'])
+    try:
+        _press(app, ord('P'))
+        _draw_packages(app)
+
+        # 'c' is the last package, so the list wraps to the first row.
+        assert app.win.pick_pos == 0
+
+        _press(app, 27)
+        assert app.cleanup.package == 'a'
+    finally:
+        app.win.stop_curses()
+
+
+def test_escape_on_the_table_package_does_not_reload(monkeypatch):
+    calls = []
+
+    def fake_fetch(self):
+        calls.append(self.package)
+        return []
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    app = _app(CleanupTui('solo'), packages=['solo'])
+    try:
+        _press(app, ord('P'))
+        _draw_packages(app)
+
+        _press(app, 27)
+
+        assert app.stack.curr.num == tui_mod.MAIN_ST
+        assert app.cleanup.package == 'solo'
+        assert calls == []
+    finally:
+        app.win.stop_curses()
+
+
+def test_x_removes_a_package_from_the_list_not_from_the_index(tmp_path):
+    ini = _ini(tmp_path)
+    app = _app(CleanupTui('a', user='alice'), ini=ini, packages=['a', 'b', 'c'])
+    try:
+        _press(app, ord('P'))
+        _draw_packages(app)
+        app.win.pick_pos = 1
+
+        _press(app, ord('x'))
+
+        assert app.packages == ['a', 'c']
+        assert app.cleanup.package == 'a'
+        assert app.package_index == 0
+        assert ini.vals.packages == 'a,c'
+        assert _ini(tmp_path).vals.packages == 'a,c'
+    finally:
+        app.win.stop_curses()
+
+
+def test_removing_the_current_package_leaves_it_in_the_table(monkeypatch):
+    app = _app(CleanupTui('a'), packages=['a', 'b', 'c'])
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    try:
+        app.load_versions()
+        _press(app, ord('P'))
+        _draw_packages(app)
+        app.win.pick_pos = 0
+
+        _press(app, ord('x'))
+        _draw_packages(app)
+
+        assert app.packages == ['b', 'c']
+        # The list is a working set, not the index: the table keeps 'a'.
+        assert app.cleanup.package == 'a'
+
+        # The row that took 'a's place stays reachable: ESC opens 'b', and p
+        # still rotates from there.
+        _press(app, 27)
+        assert app.cleanup.package == 'b'
+
+        _press(app, ord('p'))
+        assert app.cleanup.package == 'c'
+    finally:
+        app.win.stop_curses()
+
+
+def test_escape_leaves_the_program_when_the_package_list_is_emptied():
+    app = _app(CleanupTui('a'), packages=['a'])
+    try:
+        _press(app, ord('P'))
+        _draw_packages(app)
+        _press(app, ord('x'))
+        _draw_packages(app)
+
+        assert app.packages == []
+        assert app.cleanup.package == 'a'
+        assert app.win.body.texts == ['No packages in the list.']
+
+        # With no row to act on, x is inert.
+        _press(app, ord('x'))
+        assert app.packages == []
+
+        # With no row to open, ESC is the way out.
+        _press(app, 27)
+        assert app.running is False
+    finally:
+        app.win.stop_curses()
+
+
+def test_an_unknown_package_is_neither_selected_nor_removed():
+    app = _app(CleanupTui('a'), packages=['a', 'b'])
+    try:
+        app.select_package('ghost')
+        app.remove_package('ghost')
+
+        assert app.packages == ['a', 'b']
+        assert app.cleanup.package == 'a'
+        assert app.package_index == 0
+    finally:
+        app.win.stop_curses()
+
+
+def test_help_from_the_package_list_returns_to_it():
+    app = _app(CleanupTui('a'), packages=['a', 'b'])
+    try:
+        _press(app, ord('P'))
+        _press(app, ord('?'))
+
+        assert app.stack.curr.num == tui_mod.HELP_ST
+
+        _press(app, 27)
+        assert app.stack.curr.num == tui_mod.PACKAGES_ST
     finally:
         app.win.stop_curses()
 
@@ -1336,14 +1613,17 @@ def test_help_screen_lists_the_selection_and_zone_keys():
         for hint in ('x - mark this release', 'X - mark this release',
                      'u - unmark this release', 'U - unmark this release',
                      'z - date time zone', 's - change the sort order',
-                     'p - next package', 'h - switch index',
+                     'p - next package', 'h - switch index', 'P - package list',
                      'T - themes', '/ - incremental search',
+                     'x - remove from the package list',
+                     'ESC - back, or open the picked package',
                      'd - delete the marked versions (TODO)'):
             assert hint in text
         assert tui_mod.UTC_MODE in text
         assert tui_mod.LOCAL_MODE in text
         assert 'Color theme' in text
         assert 'visible rows only' in text
+        assert 'working package list' in text
     finally:
         app.win.stop_curses()
 

@@ -39,11 +39,12 @@ The release table opens in the terminal:
 | Key | Action |
 | --- | ------ |
 | `q` | quit |
-| `?` | open the help screen; `ESC` returns to the table |
+| `?` | open the help screen; `ESC` returns to the screen that opened it |
 | `/` | open the incremental search; `ENTER` closes it, `ESC` restores the pattern |
 | `T` | open the THEMES screen; `ESC` returns to the table |
 | `t` | cycle the color theme (THEMES screen only; `mono` turns color off) |
 | `p` | show the next package in the list and reload |
+| `P` | open the package list |
 | `h` | switch between pypi.org and test.pypi.org and reload |
 | `x` | mark the picked release for deletion, then step down |
 | `X` | mark the picked release and every release below it, then step up (unmarked row only) |
@@ -63,6 +64,30 @@ The table loads after it opens: the body shows `Loading ...` in the hot-swap
 colour, then the releases appear.  `p` does not reload when the list holds only
 one package.  A failed load opens a modal alert with the error details;
 dismissing it leaves the body empty, ready for another package or index.
+
+`P` opens the package list, whose rows are also what `p` rotates through:
+
+```text
+PACKAGES  x:remove ESC:open ?:help
+  PACKAGE  VERs  DELs
+✓ alpha       3     0
+✓ beta        2     0
+  gamma       -     -
+```
+
+The untitled first column carries `✓` once this run has loaded that package;
+`VERs` is the number of releases its history held at that load, and `DELs` is
+the number of versions this run has deleted from it (nothing is deleted yet, so
+it stays `0` until the deletion step lands).  Both numbers show `-` until the
+package is loaded, because the screen never invents a count.
+
+The screen opens with the pick on the package `p` would show next, so `ESC` --
+which opens the picked package in the table and returns -- is one keypress from
+the table's package to the next one.  `x` removes the picked name from the
+list: the index itself is untouched, so a removed package is simply no longer
+visited by `p` or remembered for the next run.  With the list emptied there is
+nothing to open, so `ESC` leaves the program; `?` opens the help screen, whose
+`ESC` returns to the package list.
 
 The first header line always ends with a search field: a bare `/` before
 anything is typed, then `/pattern` after a search.  Pressing `/` opens it and
@@ -126,8 +151,16 @@ pypi-cleanup-tui
 re-opens the same package from the same index, with the same zone, order and
 theme.  The package list is kept as one comma separated value -- which is why
 the two spellings above are equivalent -- and the table still shows one package
-per run, the first in the list.  The help screen (`?`) lists the saved options
-and the file they came from.
+per run, the first in the list.  Package arguments are cumulative: a run puts
+its names in front of the remembered list and drops duplicates, keeping the
+first occurrence.
+
+```bash
+pypi-cleanup-tui newpack     # list becomes: newpack, then the stored names
+pypi-cleanup-tui pack2       # a name already stored keeps its first position
+```
+
+The help screen (`?`) lists the saved options and the file they came from.
 
 ## Development
 

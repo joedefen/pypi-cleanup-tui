@@ -11,6 +11,11 @@ list, the two table settings the TUI can change (``zone`` and ``sort``), and the
 appearance choices (``theme`` and ``no_color``) are kept in
 ``~/.config/pypi-cleanup-tui/config.ini``, and every option's default is the
 stored value -- so a second run can be just ``pypi-cleanup-tui``.
+
+Package arguments are cumulative rather than replacing the stored list: a run's
+names go in front of the remembered ones, and a name both lists hold keeps its
+first position.  The first name is therefore the package the table opens, and a
+plain run still opens the same one as before.
 """
 
 from __future__ import annotations
@@ -225,6 +230,22 @@ def split_packages(raw: Sequence[str] | str) -> list[str]:
     return [name for name in names if name]
 
 
+def merge_packages(
+    argument: Sequence[str] | str,
+    remembered: Sequence[str] | str,
+) -> list[str]:
+    """Combine this run's package arguments with the remembered list.
+
+    The command line is cumulative: its names go in front of the stored ones,
+    so the first argument is the package the table opens, and a name held by
+    both lists keeps the position it has in the front list.  ``dict.fromkeys``
+    does the de-duplication in order, which is exactly "keep the first".
+    """
+    return list(dict.fromkeys(
+        split_packages(argument) + split_packages(remembered)
+    ))
+
+
 def _normalise(value: str, allowed: Sequence[str], fallback: str) -> str:
     """Return *value* if it is one of *allowed*, else *fallback*.
 
@@ -336,8 +357,10 @@ def main(
     parser = _build_parser(vals)
     args = parser.parse_args(argv)
 
-    # The command line wins; an empty one falls back to the stored list.
-    packages = split_packages(args.packages) or split_packages(vals.packages)
+    # The command line is cumulative: this run's names go in front of the
+    # remembered list, and duplicates keep their first position.  An empty
+    # command line therefore runs the stored list unchanged.
+    packages = merge_packages(args.packages, vals.packages)
     if not packages:
         parser.error("at least one package name is required")
 
