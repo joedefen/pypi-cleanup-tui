@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""runner -- run this checkout's pypi-cleanup-tui without installing it.
+
+    ./runner --version
+    ./runner requests --dump
+
+This is the development launcher, not part of a release.  It runs the source
+tree directly: the checkout is put on `sys.path` first, so the package beside
+this file is the one that executes, and `pypi_cleanup_tui.main` is run as
+`__main__`, so live edits are picked up immediately.  Nothing is installed,
+and `~/.local/bin` is not touched.
+
+In the project's `.venv`, use `.venv/bin/python ./runner`; the equivalent
+one-off is `python -m pypi_cleanup_tui.main`.
+"""
+
+import os
+import runpy
+import sys
+
+if __name__ == '__main__':
+    # Ensure the project root is importable regardless of how we were invoked.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    # Set a friendly program name while preserving any command-line arguments.
+    sys.argv[0] = 'pypi-cleanup-tui'
+    # Run the entry-point module as __main__ so its "if __name__ == '__main__'" runs.
+    runpy.run_module('pypi_cleanup_tui.main', run_name='__main__', alter_sys=True)

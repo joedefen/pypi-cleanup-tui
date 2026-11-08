@@ -37,6 +37,18 @@ together with the `dev` extra (pytest, ruff, build and twine):
 bt penv        # from the repository root; `bt penv pypi-cleanup-tui` elsewhere
 ```
 
+Run the source tree without installing anything:
+
+```bash
+./runner requests --dump
+```
+
+`runner` executes [`pypi_cleanup_tui/main.py`](pypi_cleanup_tui/main.py) as
+`__main__`, so live edits are picked up immediately. In the checkout's `.venv`,
+use `.venv/bin/python ./runner`; the equivalent one-off is
+`python -m pypi_cleanup_tui.main`. It installs nothing and does not touch
+`~/.local/bin`.
+
 Run the test gate with the same commands `./bless` runs, on that interpreter:
 
 ```bash

@@ -13,6 +13,7 @@ assume the repository root, which is where the gate has to be run.
 | --- | --- |
 | [`pypi_cleanup_tui/__init__.py`](../pypi_cleanup_tui/__init__.py) | `__version__`, and nothing else. The build backend reads it, `pypi-cleanup-tui --version` prints it, and `bless` reads the line without importing the package. |
 | [`pypi_cleanup_tui/main.py`](../pypi_cleanup_tui/main.py) | The release-history model (`Release`, `CleanupTui`) and the command-line entry point. Deletion is still a future step; the interactive TUI will be layered here. |
+| [`runner`](../runner) | The development launcher: runs `pypi_cleanup_tui.main` from this checkout as `__main__`, without installing anything and without claiming `~/.local/bin`. |
 | [`pyproject.toml`](../pyproject.toml) | Name, description, keywords, `requires-python`, runtime dependencies, the `dev` extra, and the pytest, coverage, ruff and `[tool.bless]` configuration. |
 | [`bless`](../bless) | The release gate, emitted verbatim from [`../../blessd/bless`](../../blessd/bless) by that repository's `build.py`. It holds no copy of this project's identity, and it is never edited here. |
 | [`blessd/docs/release-strategy.md`](../../blessd/docs/release-strategy.md) | The release strategy every project shares: the branch model, the stages, the rehearsal, the credentials. This file documents only what is particular to `pypi-cleanup-tui`. |
@@ -214,8 +215,9 @@ Run it by hand on any built pair:
 * The environment was moved to the per-project model, which is the postscript
   of the same procedure and changes where the *package* lives, not what `bless`
   does. `bt penv` built `.venv` around the tree (editable `pypi-cleanup-tui`
-  plus the `dev` extra); there is no `runner` here, and no entry point is
-  installed on the development machine unless `bt edit` or a release claims it.
+  plus the `dev` extra). [`runner`](../runner) runs the source tree as
+  `__main__` without installing anything, and no entry point is installed on
+  the development machine unless `bt edit` or a release claims it.
 * The project needed six things for the gate: a flat layout (the package moved
   from `src/pypi_cleanup_tui/` to `pypi_cleanup_tui/`), one version location
   (`dynamic = ["version"]` with `[tool.hatch.version]`), an inspector, the
