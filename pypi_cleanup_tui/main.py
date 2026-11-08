@@ -1,9 +1,9 @@
 """Release history model and command-line entry point for pypi-cleanup-tui.
 
-This module currently provides the data layer only: it fetches a project's
-release history from the PyPI JSON API, keeps it sorted, and can dump it as a
-plain table.  The interactive TUI will be layered on top of
-:class:`CleanupTui` later; deletion itself is delegated to ``pypi-cleanup``.
+This module owns the data layer: it fetches a project's release history from
+the PyPI JSON API, keeps it sorted, and can dump it as a plain table.  The
+interactive interface lives in :mod:`pypi_cleanup_tui.tui`; deletion itself is
+delegated to ``pypi-cleanup``.
 """
 
 from __future__ import annotations
@@ -40,6 +40,8 @@ class Release:
 
     version: str
     uploaded: datetime
+    #: Whether the TUI has marked this release for deletion.
+    delete: bool = False
 
     def __str__(self) -> str:
         return f"{self.version:<20} {self.uploaded:%Y-%m-%d %H:%M}"
@@ -196,7 +198,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "project",
         nargs="?",
-        help="PyPI project name (required until the interactive TUI lands)",
+        help="PyPI project name",
     )
     parser.add_argument(
         "-s",
@@ -251,16 +253,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     cleanup.sort_versions(args.sort)
 
-    if not args.dump:
-        print(
-            "error: the interactive TUI is not implemented yet; "
-            "rerun with --dump to print the release table",
-            file=sys.stderr,
-        )
-        return 2
+    if args.dump:
+        cleanup.dump()
+        return 0
 
-    cleanup.dump()
-    return 0
+    # Imported here so --version and --dump do not pay for the terminal stack
+    # when this project is used only to query or print the release table.
+    from pypi_cleanup_tui.tui import run_tui
+
+    return run_tui(cleanup)
 
 
 if __name__ == "__main__":

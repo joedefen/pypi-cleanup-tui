@@ -65,6 +65,8 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
+    # The TUI toolkit, pinned to the API this project is written against.
+    "console-window==2.2.2",
     # The gate refuses a `packaging` older than 26: the validator must be at
     # least as new as the metadata writer.  Declaring the same floor here means
     # the installed package always satisfies the gate.

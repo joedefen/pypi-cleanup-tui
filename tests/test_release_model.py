@@ -208,11 +208,21 @@ def test_main_reports_a_network_failure(monkeypatch, capsys):
     assert 'could not fetch pypi.org/demo' in capsys.readouterr().err
 
 
-def test_main_explains_the_tui_is_not_implemented(monkeypatch, capsys):
+def test_main_launches_the_tui_when_dump_is_absent(monkeypatch):
     monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
 
-    assert cli.main(['demo']) == 2
-    assert 'not implemented yet' in capsys.readouterr().err
+    import pypi_cleanup_tui.tui as tui
+
+    seen = []
+
+    def fake_run_tui(cleanup):
+        seen.append(cleanup)
+        return 0
+
+    monkeypatch.setattr(tui, 'run_tui', fake_run_tui)
+
+    assert cli.main(['demo']) == 0
+    assert [item.package for item in seen] == ['demo']
 
 
 def test_main_dumps_the_table_in_the_requested_order(monkeypatch, capsys):

@@ -25,7 +25,35 @@ pip install -e .
 ## Usage
 
 ```bash
-pypi-cleanup-tui
+pypi-cleanup-tui requests
+```
+
+The release table opens in the terminal:
+
+| Key | Action |
+| --- | ------ |
+| `q` | quit |
+| `?` | open the help screen; `ESC` returns to the table |
+| `x` | mark the picked release for deletion, then step down |
+| `X` | mark the picked release and every release below it, then step up |
+| `u` | unmark the picked release, then step down |
+| `U` | unmark the picked release and every release below it, then step up |
+| `D` | switch the `DATE` column between UTC and the local time zone |
+
+A marked release shows `✘` in the `DEL` column and its remaining cells are
+dimmed; the marker itself stays plain so it is still easy to read.  While
+anything is marked, the releases that will be kept are drawn in the success
+colour, so both halves of the decision are visible at once.
+
+The column titles sit in a third, dim header line above the table (with no rule
+under it), and the `DATE` title names the zone in force, e.g. `DATE (UTC)` or
+`DATE (EDT)` after pressing `D`.  This is selection only: nothing is deleted
+yet.
+
+`--dump` prints the same table without the interactive interface:
+
+```bash
+pypi-cleanup-tui requests --dump
 ```
 
 ## Development
@@ -40,7 +68,8 @@ bt penv        # from the repository root; `bt penv pypi-cleanup-tui` elsewhere
 Run the source tree without installing anything:
 
 ```bash
-./runner requests --dump
+./runner requests          # the interactive table
+./runner requests --dump   # the plain table
 ```
 
 `runner` executes [`pypi_cleanup_tui/main.py`](pypi_cleanup_tui/main.py) as
