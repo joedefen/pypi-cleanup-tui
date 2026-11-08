@@ -32,7 +32,15 @@ pypi-cleanup-tui --host test pack1   # query test.pypi.org instead of pypi.org
 pypi-cleanup-tui -u alice pack1      # the PyPI user, kept for the cleanup step
 pypi-cleanup-tui --theme nord pack1  # install a palette (see the THEMES screen)
 pypi-cleanup-tui --no-color pack1    # attributes instead of color; remembered
+pypi-cleanup-tui --read-only pack1   # browse only: no delete key, no checks
 ```
+
+The table hands the marked releases to
+[`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/), which performs the
+actual deletion, so a normal run checks for it first and stops with a hint to
+install it when it is missing.  `--read-only` skips that check and disarms the
+delete key: the run browses the history and the hint line shows `R/O` where
+`del` would be.
 
 The release table opens in the terminal:
 
@@ -52,7 +60,8 @@ The release table opens in the terminal:
 | `U` | unmark the picked release and every release below it, then step up (marked row only) |
 | `z` | switch the `DATE` column between UTC and the local time zone |
 | `s` | change the sort order |
-| `d` | show the pending deletion count (placeholder; nothing is deleted yet) |
+| `d` | leave the table and run `pypi-cleanup` on the marked releases; the command is printed, not run, for now |
+| `g` | apply the stability gap on the table; on the help screen, rotate the gap instead |
 
 The second header line summarises the run: `User=...`, `[p]ack=...` and
 `[h]ost=...`.  `User` is read-only and shows `n/a` until `-u` is given; `p`
@@ -77,8 +86,8 @@ PACKAGES  x:remove ESC:open ?:help
 
 The untitled first column carries `✓` once this run has loaded that package;
 `VERs` is the number of releases its history held at that load, and `DELs` is
-the number of versions this run has deleted from it (nothing is deleted yet, so
-it stays `0` until the deletion step lands).  Both numbers show `-` until the
+the number of versions this run has deleted from it (the deletion run is still
+a placeholder, so it stays `0` for now).  Both numbers show `-` until the
 package is loaded, because the screen never invents a count.
 
 The screen opens with the pick on the package `p` would show next, so `ESC` --
@@ -116,8 +125,9 @@ not apply is blanked instead of removed, so its width never changes and the
 keys to its right never move:
 
 ```text
-    x:mark X:mark▼ sort zone quit ?:help /     nothing marked, unmarked row
-del unmark Unmark▼ sort zone quit ?:help /     marked, pick on a marked row
+    x:mark X:mark▼ sort zone gap30 quit ?:help /     nothing marked, unmarked row
+del unmark Unmark▼ sort zone gap30 quit ?:help /     marked, pick on a marked row
+R/O unmark Unmark▼ sort zone gap30 quit ?:help /     read-only, d never offered
 ```
 
 The marking pair and the unmarking pair are the same width, and the row under
@@ -125,10 +135,28 @@ the pick chooses between them: an unmarked row offers `x`/`X`, a marked row
 offers `u`/`U`.  `X` therefore only marks down from an unmarked row, and `U`
 only unmarks down from a marked row.  `del` leads the line once something is
 marked and no pattern is filtering the table -- a filter can hide marked
-releases, so `d` is inert while one is in force.  Pressing `d` shows
-`To delete N versions [TODO]` in a two-second message box.  The search field at
-the end is the one block whose width follows its text.  The theme key is listed
-on the help screen only.  This is selection only: nothing is deleted yet.
+releases, so `d` is inert while one is in force.  A `--read-only` run fills that
+same block with `R/O` and never offers `d` at all.  Pressing `d` leaves curses
+for the bare terminal, prints the `pypi-cleanup` command built from the marked
+versions, and waits for `ENTER` below a decorated prompt before re-entering
+curses with the table intact; the deletion itself is still a placeholder, so
+the command is printed rather than executed.  The search field at the end is
+the one block whose width follows its text.  The theme key is listed on the
+help screen only; `gap30` is the stability gap in force, and pressing `g`
+applies it.
+
+`g` is the stability filter, and it means something different on each screen: on
+the help screen it rotates the gap -- 3, 7, 14, 30 or 60 days; a first run
+starts at 30 -- and on the table it applies the current gap.  Every marked
+release that no other release followed within that many days is unmarked, so the
+releases that stayed current long enough to be the one people installed are
+kept; the newest release counts as stable as well, because nothing followed it
+at all.  The table judges the whole history, not just the visible rows -- how
+quickly a release was superseded is a fact about the package -- and `g` only
+ever unmarks, so a hidden release cannot be swept up by it.  The hint line shows
+the gap in force as `gap30`, and a two-second message box reports how many of
+the marked releases were kept.  The gap is one of the remembered options, so the
+next run starts with the value the last one ended with.
 
 The THEMES screen shows the palette names and their swatches.  Its last entry,
 `mono`, is not a palette: choosing it turns semantic color off, exactly like
@@ -138,22 +166,24 @@ like without color.
 
 ### Options are remembered
 
-The user, the index, the package list, the two settings the table itself
-can change (`z` for the date zone, `s` for the sort order), and the appearance
-(`theme` and whether color is on) are stored in
-`~/.config/pypi-cleanup-tui/config.ini`.  Every option's default is the stored
-value, so after the first run
+The user, the index, the package list, the settings the table itself can change
+(`z` for the date zone, `s` for the sort order, and the stability `gap` that
+`g` rotates on the help screen), and the appearance (`theme` and whether color
+is on) are stored in `~/.config/pypi-cleanup-tui/config.ini`.  Every option's
+default is the stored value, so after the first run
 
 ```bash
 pypi-cleanup-tui
 ```
 
-re-opens the same package from the same index, with the same zone, order and
-theme.  The package list is kept as one comma separated value -- which is why
-the two spellings above are equivalent -- and the table still shows one package
-per run, the first in the list.  Package arguments are cumulative: a run puts
-its names in front of the remembered list and drops duplicates, keeping the
-first occurrence.
+re-opens the same package from the same index, with the same zone, order,
+stability gap and theme.  The package list is kept as one comma separated value
+-- which is why the two spellings above are equivalent -- and the table still
+shows one package per run, the first in the list.  Package arguments are
+cumulative: a run puts its names in front of the remembered list and drops
+duplicates, keeping the first occurrence.  `--read-only` is deliberately not
+remembered: it covers a single run, so a browse-only session can never quietly
+disarm the next one.
 
 ```bash
 pypi-cleanup-tui newpack     # list becomes: newpack, then the stored names

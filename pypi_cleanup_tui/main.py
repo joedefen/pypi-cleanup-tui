@@ -7,10 +7,16 @@ The TUI triggers the fetch after it opens, so a failed lookup is reported in an
 alert over the table instead of ending the run before anything is drawn.
 
 The command line remembers what it was told.  The user, the index, the package
-list, the two table settings the TUI can change (``zone`` and ``sort``), and the
-appearance choices (``theme`` and ``no_color``) are kept in
+list, the settings the TUI can change (``zone``, ``sort`` and the stability
+``gap``), and the appearance choices (``theme`` and ``no_color``) are kept in
 ``~/.config/pypi-cleanup-tui/config.ini``, and every option's default is the
 stored value -- so a second run can be just ``pypi-cleanup-tui``.
+
+The table hands the marked releases to ``pypi-cleanup``, the program that does
+the actual deletion, so a normal run checks for it at startup and refuses to
+start without it.  ``--read-only`` skips that check and keeps the table from
+ever offering to delete: it is the way to browse a machine that does not have
+the deletion program, and the way to try the interface without any risk.
 
 Package arguments are cumulative rather than replacing the stored list: a run's
 names go in front of the remembered ones, and a name both lists hold keeps its
@@ -21,6 +27,7 @@ plain run still opens the same one as before.
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -36,6 +43,11 @@ from pypi_cleanup_tui.ini import IniManager
 
 #: Program name, and the directory under ``~/.config`` holding the options.
 APP_NAME = "pypi-cleanup-tui"
+
+#: The external program that performs the actual deletion.  The TUI hands it
+#: the marked versions, so a normal run checks for it before opening the table;
+#: ``--read-only`` is the way to skip both the check and the hand-off.
+CLEANUP_TOOL = "pypi-cleanup"
 
 #: The color mode that is not a palette: choosing it turns semantic color off,
 #: exactly like ``--no-color``.  The palette names themselves live in
@@ -65,6 +77,16 @@ SORT_BY_VERSION = "version"
 SORT_BY_DATE = "date"
 SORTS = (SORT_BY_VERSION, SORT_BY_DATE)
 
+#: The stability gaps, in days, that the TUI's hidden ``g`` option cycles
+#: through on the help screen.  The gap is stored like the other settings, so a
+#: run judges the history with the gap the last run left in force.
+GAP_CHOICES = (3, 7, 14, 30, 60)
+
+#: The gap a run starts with.  A month of stability is the point of the
+#: heuristic -- the shortest gap would keep almost the whole history -- so this
+#: is the first-run default and the fallback for a stored value nobody knows.
+DEFAULT_GAP = 30
+
 #: Seconds to wait for the PyPI JSON API.
 REQUEST_TIMEOUT = 30.0
 
@@ -77,6 +99,7 @@ DEFAULTS = {
     'packages': '',
     'zone': UTC_MODE,
     'sort': SORT_BY_VERSION,
+    'gap': DEFAULT_GAP,
     'theme': '',
     'no_color': False,
 }
@@ -256,6 +279,21 @@ def _normalise(value: str, allowed: Sequence[str], fallback: str) -> str:
     return value if value in allowed else fallback
 
 
+def _normalise_gap(value: object) -> int:
+    """Return *value* as a gap if it is one of *GAP_CHOICES*, else the default.
+
+    The stored gap is a number in a file a user can edit, so it gets the same
+    care as the other stored choices: an unknown value falls back instead of
+    reaching the stability filter, and anything that is not a number at all
+    (an unparseable entry leaves the string default in place) falls back too.
+    """
+    try:
+        gap = int(str(value))
+    except (TypeError, ValueError):
+        return DEFAULT_GAP
+    return gap if gap in GAP_CHOICES else DEFAULT_GAP
+
+
 def _theme_choices() -> tuple[str, ...]:
     """The theme names, imported lazily so ``--version`` stays light.
 
@@ -286,6 +324,21 @@ def _normalise_theme(value: str) -> str:
     if not value:
         return ''
     return value if value in _theme_choices() else ''
+
+
+def cleanup_tool_available() -> bool:
+    """Whether the program that performs the deletion is on the ``PATH``."""
+    return shutil.which(CLEANUP_TOOL) is not None
+
+
+def missing_cleanup_tool_message() -> str:
+    """The advice printed when the deletion program cannot be found."""
+    return (
+        f'error: {CLEANUP_TOOL} is not on the PATH, so nothing could be '
+        'deleted.\n'
+        f'Install it with "pip install {CLEANUP_TOOL}" and try again, or run '
+        'with --read-only to browse the history without deleting.'
+    )
 
 
 def _build_parser(vals: SimpleNamespace) -> argparse.ArgumentParser:
@@ -344,6 +397,12 @@ def _build_parser(vals: SimpleNamespace) -> argparse.ArgumentParser:
              "remembered for the next run, and NO_COLOR does the same when "
              "the switch is absent",
     )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="skip the pypi-cleanup check and browse without the ability to "
+             "delete; the hint line shows R/O and d is never offered",
+    )
     return parser
 
 
@@ -364,9 +423,17 @@ def main(
     if not packages:
         parser.error("at least one package name is required")
 
+    # The deletion is delegated, so a normal run needs the program that
+    # performs it.  The check happens before anything is saved: a run that
+    # cannot finish must not rewrite the remembered options.
+    if not args.read_only and not cleanup_tool_available():
+        print(missing_cleanup_tool_message(), file=sys.stderr)
+        return 1
+
     host = _normalise(args.host, HOSTS, HOST_PYPI)
     zone = _normalise(vals.zone, ZONES, UTC_MODE)
     sort = _normalise(vals.sort, SORTS, SORT_BY_VERSION)
+    gap = _normalise_gap(vals.gap)
     # The command line wins; without it the remembered choice is used, and a
     # hand-edited unknown name falls back to "no explicit theme".
     theme = _normalise_theme(args.theme or vals.theme)
@@ -396,6 +463,7 @@ def main(
             packages=','.join(packages),
             zone=zone,
             sort=sort,
+            gap=gap,
             theme=theme,
             no_color=no_color,
         )
@@ -411,6 +479,8 @@ def main(
         ini=ini,
         zone=zone,
         sort=sort,
+        gap=gap,
+        read_only=args.read_only,
         packages=packages,
         theme=args.theme,
         no_color=args.no_color,

@@ -2,8 +2,10 @@
 
 The window presents the release history fetched by
 :class:`pypi_cleanup_tui.main.CleanupTui` as a table and lets the user mark the
-releases to delete.  It is selection only: nothing is uploaded, deleted or
-shelled out to yet, so every key here is safe to experiment with.
+releases to delete.  The marking itself is local; the one key that reaches
+outside the process is ``d``, which hands the marked versions to
+``pypi-cleanup``.  The hand-off is wired up, but the run is still printed
+rather than executed, so nothing is written to an index yet.
 
 Three header lines sit above the table: the key hints, the package summary, and
 the column titles.  The column titles live in the header rather than in the
@@ -54,8 +56,23 @@ next run just like the other saved options.
 
 ``d`` is advertised at the front of the hint line once anything is marked and
 no pattern is in force: a filtered table can hide the releases a deletion would
-act on.  It is a placeholder for the deletion step -- it reports the pending
-count in a short message box, because deletion itself is not wired up yet.
+act on.  Pressing it leaves curses -- the way vappman runs an external command
+-- prints the ``pypi-cleanup`` command line built from the marked versions,
+waits for ENTER below a decorated prompt, and re-enters curses with the table
+intact.  The command is printed rather than executed for now, so the table
+cannot yet write to an index.  A ``--read-only`` run never offers ``d``: the
+hint block reads ``R/O`` instead, always.
+
+``g`` is the stability filter, and it means something different on each screen:
+on the help screen it rotates the gap -- 3, 7, 14, 30 or 60 days -- and on the
+table it applies that gap, unmarking every marked release that no other release
+followed within that many days.  A release that stayed current for the whole
+gap is the one people actually installed, so the sweep keeps it; the newest
+release counts as stable too, because nothing followed it at all.  The table
+judges the whole history rather than the visible rows, the key only ever
+unmarks, and a run starts with the gap at 30 days.  The gap is stored like the
+other settings, so the next run applies the same one; the hint line carries the
+value as ``gap30``, so the gap in force is always in view.
 
 ``P`` opens the working package list.  Every row carries a check mark once this
 run has loaded the package, its name, how many versions the history held, and
@@ -72,11 +89,14 @@ with duplicates dropped, keeping the first.
 
 from __future__ import annotations
 
+import bisect
 import curses
 import os
 import re
+import shlex
+import textwrap
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -98,6 +118,9 @@ from console_window import (
 from console_window import help as help_text
 
 from pypi_cleanup_tui.main import (
+    CLEANUP_TOOL,
+    DEFAULT_GAP,
+    GAP_CHOICES,
     HOST_PYPI,
     HOST_TEST,
     LOCAL_MODE,
@@ -148,6 +171,20 @@ DOWN_MARK = "▼"
 #: the blocks to its right never move.
 DEL_HINT = "del"
 
+#: The same block while the run is read-only.  It is deliberately as wide as
+#: DEL_HINT, so a run that can never delete keeps the hint line's shape.
+READ_ONLY_HINT = "R/O"
+
+#: The prompt shown after the table has left curses for the deletion command.
+#: The bare terminal has no window to draw in, so the line is decorated and set
+#: off by blank lines to be unmistakable, the way vappman's does.
+RETURN_PROMPT = "Press ENTER to return to the TUI"
+
+#: Width of the gap number in the hint line's ``gap30`` block.  The gap is one
+#: or two digits, so the number is padded and the blocks to its right never
+#: move when it changes.
+GAP_HINT_WIDTH = 2
+
 #: Column widths.  ``DATE`` is ``YYYY/MM/DD HH:MM`` (16 cells); ``DAYS`` is
 #: right-aligned because it is the only numeric column.
 DEL_WIDTH = 3
@@ -164,6 +201,48 @@ PACKAGE_TITLE = "PACKAGE"
 #: The word the package list puts at the start of its first header line, so the
 #: screen names itself before listing the keys it accepts.
 PACKAGES_TITLE = "PACKAGES"
+
+
+def cleanup_command(cleanup: CleanupTui, versions: Sequence[str]) -> list[str]:
+    """The ``pypi-cleanup`` command line that would delete *versions*.
+
+    The marked versions become one anchored regular expression, so the command
+    names exactly the rows the table showed and nothing else; ``re.escape``
+    keeps a version identifier's dots and hyphens literal.  ``pypi-cleanup``
+    wants a user and a package, and the user falls back to the login name when
+    no ``-u`` was given.
+    """
+    pattern = '^(' + '|'.join(re.escape(version) for version in versions) + ')$'
+    return [
+        CLEANUP_TOOL,
+        '-u', cleanup.user or os.environ.get('USER', ''),
+        '-p', cleanup.package,
+        '-r', pattern,
+    ]
+
+
+def format_command(command: Sequence[str]) -> str:
+    """The command as it would be typed in a shell, with a ``+`` marker."""
+    return '+ ' + ' '.join(shlex.quote(part) for part in command)
+
+
+def press_enter(message: str = RETURN_PROMPT) -> None:
+    """Wait for ENTER on the bare terminal, below two blank lines.
+
+    The prompt is the last thing printed before curses returns, so it has to
+    work without the window; a test replaces this function wholesale rather
+    than feeding the real standard input.
+    """
+    input(f'\n\n===== {message} ====> ')
+
+
+def _reset_terminal() -> None:
+    """Clear the terminal curses has just handed back and fix its settings.
+
+    ``stty sane`` undoes anything a subprocess left behind; it is harmless when
+    stdin is not a terminal, which is how the headless tests see it.
+    """
+    os.system('clear; stty sane')
 
 
 def days_ago(release: Release, now: datetime | None = None) -> int:
@@ -225,6 +304,29 @@ def column_header(mode: str = UTC_MODE, sort: str = SORT_BY_VERSION,
         f"{'DAYS':>{DAYS_WIDTH}}"
         f"{' ' * VERSION_GAP}{version_label}"
     )
+
+
+def stable_releases(versions: Sequence[Release], gap: int) -> list[Release]:
+    """The marked releases that stayed current for at least *gap* days.
+
+    A release is stable when the next release in the history arrived more than
+    *gap* days after it, or never did because it is still the newest.  Those are
+    the releases people actually installed, which is why the table's ``g``
+    unmarks exactly these and so keeps them.  The comparison runs in upload
+    order, whatever order the table is sorted in, and every release in the
+    history counts: what was published next is a fact about the package, not
+    about the marking.  Releases that are not marked are never returned.
+    """
+    times = sorted({release.uploaded for release in versions})
+    limit = timedelta(days=gap)
+    stable: list[Release] = []
+    for release in versions:
+        if not release.delete:
+            continue
+        index = bisect.bisect_right(times, release.uploaded)
+        if index == len(times) or times[index] - release.uploaded > limit:
+            stable.append(release)
+    return stable
 
 
 @dataclass
@@ -328,12 +430,19 @@ class CleanupApp:
         theme: str | None = None,
         no_color: bool | None = None,
         sort: str = SORT_BY_VERSION,
+        gap: int = DEFAULT_GAP,
+        read_only: bool = False,
         packages: Sequence[str] | None = None,
     ) -> None:
         self.cleanup = cleanup
         #: Optional persistent options.  Without one the TUI runs exactly as
         #: before: changes apply to this session and are not written anywhere.
         self.ini = ini
+        #: A read-only run never offers to delete: the hint line says ``R/O``
+        #: instead of ``del``, and ``d`` is inert even when releases are marked.
+        #: It is a switch for this run only, never a stored option -- a sticky
+        #: read-only flag would quietly disarm the program.
+        self.read_only = bool(read_only)
         self.running = True
         #: The package list the command line supplied, shown one at a time.
         #: ``p`` rotates through it and ``P`` edits it; the model's package is
@@ -399,6 +508,11 @@ class CleanupApp:
         self.opts.theme = choice
         if zone in ZONES:
             self.opts.time_zone = zone
+        # The stability gap is stored too, so the run starts with the one the
+        # previous run left in force.  Registering the option would otherwise
+        # seed it from the head of GAP_CHOICES, and an unknown stored value
+        # falls back to a month rather than to the shortest gap.
+        self.opts.gap = gap if gap in GAP_CHOICES else DEFAULT_GAP
 
         win_opts = ConsoleWindowOpts(
             head_line=True,
@@ -430,6 +544,24 @@ class CleanupApp:
         spin.add_key('quit', 'q - quit', genre='action', keys=[ord('q')])
         spin.add_key('help_screen', '? - help', genre='action',
                      keys=[ord('?')], scope={MAIN_ST, PACKAGES_ST})
+        # The cycles come next, so the help screen lists every option that
+        # takes a value before the keys that only fire once.  A cycle needs no
+        # _ACTION method: it rewrites the option in place, the next draw reads
+        # it, and handle_key() is where the remembered ones are stored.
+        #
+        # z rewrites the time zone the DATE column names.
+        spin.add_key('time_zone', 'z - date time zone',
+                     vals=list(ZONES), keys=[ord('z')],
+                     scope={MAIN_ST})
+        # t only works on the THEMES screen; handle_key() applies the palette
+        # or the mono color mode as soon as the value changes.
+        spin.add_key('theme', 't - cycle themes', vals=list(THEME_CHOICES),
+                     keys=[ord('t')], scope={THEME_ST})
+        # The stability gap is a hidden option: g rotates it on the help screen
+        # and applies it on the table, so one key is bound twice with two
+        # meanings -- a cycle on one screen, an action on the other.
+        spin.add_key('gap', 'g - stability gap, in days', vals=list(GAP_CHOICES),
+                     keys=[ord('g')], scope={HELP_ST})
         # T opens the picker; it is the only way in, and t is bound only on
         # that screen so the table keeps its own keys untouched.
         spin.add_key('theme_screen', 'T - themes', genre='action',
@@ -462,31 +594,32 @@ class CleanupApp:
         spin.add_key('unmark_from_here',
                      'U - unmark this release and all below, move up',
                      genre='action', keys=[ord('U')], scope={MAIN_ST})
-        # Placeholder for the deletion step: the hint only appears once
-        # something is marked and no pattern is filtering the table, and
-        # pressing d reports the pending count.
-        spin.add_key('delete', 'd - delete the marked versions (TODO)',
-                     genre='action', keys=[ord('d')], scope={MAIN_ST})
-        # A cycle, not an action: z rewrites the option in place and the next
-        # draw reads it, so there is no time_zone_ACTION method to implement.
-        # handle_key() notices the new value and stores it.
-        spin.add_key('time_zone', 'z - date time zone',
-                     vals=list(ZONES), keys=[ord('z')],
-                     scope={MAIN_ST})
-        # The same shape for the theme: t only works on the THEMES screen, and
-        # handle_key() is where the chosen palette or mono mode is applied.
-        spin.add_key('theme', 't - cycle themes', vals=list(THEME_CHOICES),
-                     keys=[ord('t')], scope={THEME_ST})
+        # The deletion step: the hint only appears once something is marked and
+        # no pattern is filtering the table.  Pressing d hands the marked
+        # versions to pypi-cleanup; a read-only run says so in the help list.
+        spin.add_key(
+            'delete',
+            'd - delete the marked versions' + (
+                ' (read-only mode)' if read_only else ' with pypi-cleanup'),
+            genre='action', keys=[ord('d')], scope={MAIN_ST},
+        )
         # Sorting changes the model rather than a spinner value, so it is an
         # action; the hint line advertises it between the marking keys and z.
         spin.add_key('sort', 's - change the sort order',
                      genre='action', keys=[ord('s')], scope={MAIN_ST})
+        # g's action: the qualifier names its screen because g also rotates
+        # the gap on the help screen, and the help body lists both lines.
+        spin.add_key('apply_gap',
+                     'g - keep the releases that stayed stable [Main Screen]',
+                     genre='action', keys=[ord('g')], scope={MAIN_ST})
         # "/" opens the incremental search field in the first header line.
         spin.add_key('search', '/ - incremental search',
                      genre='action', keys=[ord('/')], scope={MAIN_ST})
         # The package list's row key.  It is scoped to that screen, so x there
-        # removes a name while x on the table still marks a release.
-        spin.add_key('package_remove', 'x - remove from the package list',
+        # removes a name while x on the table still marks a release; the
+        # qualifier keeps the two x lines apart in the help body.
+        spin.add_key('package_remove',
+                     'x - remove from the package list [Package Screen]',
                      genre='action', keys=[ord('x')], scope={PACKAGES_ST})
         # ENTER is how the search bar closes its pattern on the table, so it
         # has to reach the application even though no spinner option binds it.
@@ -520,6 +653,10 @@ class CleanupApp:
             self.persist(zone=str(value))
         elif option.attr == 'theme':
             self.apply_theme_choice(str(value))
+        elif option.attr == 'gap':
+            # The gap rotates on the help screen and applies on the table; the
+            # value is worth keeping either way, so the next run starts with it.
+            self.persist(gap=int(value))
 
     def compile_search(self) -> None:
         """Compile the search text into :attr:`search_re`.
@@ -613,6 +750,26 @@ class CleanupApp:
         appearance.set_colors_enabled(True)
         self.win.set_theme(choice)
         self.persist(theme=choice, no_color=False)
+
+    def hand_off_to_cleanup(self, command: Sequence[str]) -> None:
+        """Leave curses for *command*, wait for ENTER, and return to the table.
+
+        The window is suspended, not stopped, the same way vappman runs its
+        helper commands: ``endwin()`` restores the tty -- so a subprocess and a
+        plain ``input()`` prompt work -- and ``resume_curses()`` reattaches the
+        screen, which the redrawing ``render()`` repaints from the preserved
+        table.  The run itself is still a placeholder, so the command is
+        printed rather than executed; the shape of the hand-off is what this
+        method is for.
+        """
+        self.win.suspend_curses()
+        try:
+            _reset_terminal()
+            print(format_command(command))
+            press_enter()
+        finally:
+            self.win.resume_curses()
+        self.win.render(redraw=True)
 
     def _option_for(self, key: int) -> SimpleNamespace | None:
         """The spinner option bound to *key* on the current screen, if any."""
@@ -788,6 +945,10 @@ class MainScreen(CleanupScreen):
         """The ``D`` spinner's current value; UTC until the spinner is read."""
         return self.app.spin.get_value('time_zone') or UTC_MODE
 
+    def _gap_days(self) -> int:
+        """The stability gap the spinner holds, in days."""
+        return int(self.app.spin.get_value('gap') or DEFAULT_GAP)
+
     def _hint_line(self) -> HeaderLine:
         """The first header line: one fixed-width block per key.
 
@@ -800,10 +961,14 @@ class MainScreen(CleanupScreen):
         it sits last, so even that moves nothing.
         """
         hints = HeaderLine()
-        # The deletion placeholder leads the line, and only while it may fire:
-        # a pattern in force can hide marked releases, so d must not offer to
-        # delete what the screen does not show.
-        if self._deletion_offered():
+        # The deletion block leads the line.  A read-only run always says R/O:
+        # it can never delete, and the block is as wide as "del", so the keys
+        # to its right stay put.  Otherwise the block is only filled while d
+        # may fire -- a pattern in force can hide marked releases, so d must
+        # not offer to delete what the screen does not show.
+        if self.app.read_only:
+            hints.text(READ_ONLY_HINT)
+        elif self._deletion_offered():
             hints.bracket_key('d').text(DEL_HINT[1:])
         else:
             hints.text(' ' * len(DEL_HINT))
@@ -822,6 +987,9 @@ class MainScreen(CleanupScreen):
         # from-here-down keys trade "-all" for the arrow glyph.
         hints.bracket_key('s').text('ort ')
         hints.bracket_key('z').text('one ')
+        # The gap in force, because g applies it right here.  The number is
+        # padded so a one-digit gap does not move the keys to its right.
+        hints.bracket_key('g').text(f'ap{self._gap_days():<{GAP_HINT_WIDTH}} ')
         hints.bracket_key('q').text('uit ')
         hints.bracket_key('?').text(':help')
         # The search field is always present, even with an empty pattern; the
@@ -877,9 +1045,14 @@ class MainScreen(CleanupScreen):
 
         A pattern in force can hide marked releases, so deleting behind it
         would act on rows the screen does not show.  A pattern that does not
-        compile yet leaves the table unfiltered and so blocks nothing.
+        compile yet leaves the table unfiltered and so blocks nothing.  A
+        read-only run never offers the key at all.
         """
-        return self._marked_count() > 0 and self.app.search_re is None
+        return (
+            not self.app.read_only
+            and self._marked_count() > 0
+            and self.app.search_re is None
+        )
 
     def _release_at_pick(self) -> Release | None:
         """The visible release under the pick, or ``None`` when there is none.
@@ -1003,16 +1176,43 @@ class MainScreen(CleanupScreen):
         self._pick_release(max(ctx.index - 1, 0))
 
     def delete_ACTION(self) -> None:
-        """Report the pending deletions; the real deletion is still a TODO.
+        """Hand the marked releases to ``pypi-cleanup`` and wait to come back.
 
-        The key is inert whenever its hint block is blank -- nothing marked, or
-        a pattern filtering the table -- so a hidden release can never be swept
-        up by a deletion the user could not see coming.
+        The key is inert whenever its block is blank -- nothing marked, a
+        pattern filtering the table, or a read-only run -- so a hidden release
+        can never be swept up by a deletion the user could not see coming.  The
+        marked versions are read in table order, so the printed command names
+        exactly the rows that were on screen.
         """
         if not self._deletion_offered():
             return
-        self.app.win.flash(
-            f'To delete {self._marked_count()} versions [TODO]', duration=2.0)
+        versions = [
+            release.version
+            for release in self.app.cleanup.versions
+            if release.delete
+        ]
+        self.app.hand_off_to_cleanup(cleanup_command(self.app.cleanup, versions))
+
+    def apply_gap_ACTION(self) -> None:
+        """Keep the marked releases that stayed current for the stability gap.
+
+        ``g`` rotates the gap on the help screen and applies it here.  The whole
+        history is judged, not just the visible rows, because whether a release
+        was followed quickly is a fact about the package and not about the
+        filter; the key only ever unmarks, so a hidden release cannot be swept
+        up by it.  The flash always answers, even with nothing marked, because
+        otherwise a hidden key would look broken.
+        """
+        app = self.app
+        gap = self._gap_days()
+        marked = self._marked_count()
+        stable = stable_releases(app.cleanup.versions, gap)
+        for release in stable:
+            release.delete = False
+        app.win.flash(
+            f'Kept {len(stable)} of {marked} marked versions, gap {gap} days',
+            duration=2.0,
+        )
 
     def sort_ACTION(self) -> None:
         """Flip the table between version order and upload-date order."""
@@ -1063,51 +1263,69 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
     """The key-help screen; ESC returns to the screen that opened it."""
 
     def extra_help_paragraphs(self) -> Iterable[str]:
-        """Explain the search and theme picker, then list the saved options."""
-        paragraphs = [
+        """The essentials under the option list, one short bullet each.
+
+        The option list above already names every key, so these bullets only
+        say what a key name cannot: what a value means, which screen a key
+        acts on, and what the next step is.  :meth:`draw_notes` adds the
+        marker and the hanging indent, so the strings here carry none.
+        """
+        bullets = [
             help_text.theme_paragraph(
                 open_key='T',
                 cycle_key='t',
                 remembered=self.app.ini is not None,
             ),
-            (
-                '/ opens the incremental search at the end of the hint line. '
-                'The pattern is a case-insensitive regular expression matched '
-                'against the version column; typing filters the table, ENTER '
-                'closes the pattern and ESC restores it. While a pattern is '
-                'closed, x, X, u and U act on the visible rows only.'
-            ),
-            (
-                'The hint line is context sensitive, and its blocks keep a '
-                'fixed width so keys never shift: on an unmarked row it offers '
-                'x and X, on a marked row u and U instead. X therefore only '
-                'marks down from an unmarked row, and U only unmarks down from '
-                'a marked row. del leads the line while something is marked '
-                'and no pattern is filtering the table; d then reports the '
-                'pending count and deletes nothing yet.'
-            ),
-            (
-                'P opens the working package list. Each row shows a check '
-                'mark once this run has loaded that package, its name, the '
-                'number of versions the history held, and how many versions '
-                'this run has deleted; both numbers show a dash until the '
-                'package is loaded. The pick starts on the package p would '
-                'show next, so ESC -- which opens the picked package in the '
-                'table and returns -- is one keypress from the table to the '
-                'next package, and ESC leaves the program when the list is '
-                'empty. x removes the picked name without touching the index, '
-                'and ? returns to this screen when it is dismissed. Package '
-                'arguments are cumulative: a run puts its names in front of '
-                'the remembered list, and a name both hold appears once.'
-            ),
+            '/ opens the incremental search at the end of the hint line. The '
+            'pattern is a case-insensitive regular expression matched against '
+            'the version column; ENTER closes it, ESC restores it, and a '
+            'closed pattern limits x, X, u and U to the visible rows only.',
+            'The hint line follows the pick: an unmarked row offers x and X, a '
+            'marked row u and U instead. X and U are inert on a row already in '
+            'the state they would produce.',
+            'd hands the marked releases to pypi-cleanup. It leaves the table '
+            'for the terminal, shows the command, and waits for ENTER before '
+            'coming back; the run itself is a placeholder, so the command is '
+            'shown rather than executed. A read-only run (--read-only) never '
+            'offers d: the hint line reads R/O in its place.',
+            'g is the stability filter. On this screen it rotates the gap -- '
+            '3, 7, 14, 30 or 60 days; a run starts at 30 and remembers the '
+            'choice -- and on the main screen it unmarks every marked release '
+            'that no newer release followed within that gap, keeping the ones '
+            'that stayed current. The newest release counts as stable too, '
+            'because nothing followed it, and the whole table is judged, not '
+            'just the visible rows.',
+            'P opens the working package list. ESC opens the picked package, x '
+            'removes it, and package arguments are cumulative across runs.',
         ]
         ini = self.app.ini
         if ini is not None:
             stored = ', '.join(
                 f'{key}={getattr(ini.vals, key)!r}' for key in vars(ini.vals)
             )
-            paragraphs.append(f'Saved options ({ini.config_file_path}): {stored}')
-        return tuple(paragraphs)
+            bullets.append(f'Saved options ({ini.config_file_path}): {stored}')
+        return tuple(bullets)
+
+    def draw_notes(self, win: ConsoleWindow | None = None) -> None:
+        """Draw the bullets dim and wrapped, with a hanging indent.
+
+        ``BasicHelpScreen.draw_notes`` wraps each paragraph flush left; a list
+        reads better when the marker holds a column of its own and a continued
+        line stays under the first line's text rather than under the marker.
+        """
+        target = win if win is not None else self.app.win
+        paragraphs = list(self.extra_help_paragraphs())
+        if self.show_display_notes:
+            paragraphs.append(help_text.glyph_paragraph(target))
+        width = max(getattr(target, 'cols', 80) - 8, 20)
+        for paragraph in paragraphs:
+            for line in textwrap.wrap(
+                paragraph,
+                width=width,
+                initial_indent='* ',
+                subsequent_indent='  ',
+            ):
+                target.add_body(line, attr=curses.A_DIM)
 
 
 class PackagesScreen(CleanupScreen):
@@ -1236,6 +1454,8 @@ def run_tui(
     theme: str | None = None,
     no_color: bool | None = None,
     sort: str = SORT_BY_VERSION,
+    gap: int = DEFAULT_GAP,
+    read_only: bool = False,
     packages: Sequence[str] | None = None,
 ) -> int:
     """Present *cleanup* in the terminal and return the process exit status."""
@@ -1248,5 +1468,7 @@ def run_tui(
         theme=theme,
         no_color=no_color,
         sort=sort,
+        gap=gap,
+        read_only=read_only,
         packages=packages,
     ).run()

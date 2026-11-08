@@ -178,6 +178,19 @@ def config_path(tmp_path):
     return tmp_path / 'config.ini'
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_tool_present(monkeypatch):
+    """Pretend pypi-cleanup is installed; the missing case has its own test.
+
+    ``shutil.which`` is stubbed rather than ``cleanup_tool_available`` itself,
+    so the real check keeps running under the tests that exercise it.
+    """
+    monkeypatch.setattr(
+        cli.shutil, 'which',
+        lambda name: '/usr/bin/pypi-cleanup' if name == cli.CLEANUP_TOOL else None,
+    )
+
+
 def stored(config_path, **overrides):
     """Create the config file, optionally storing more than the defaults."""
     ini = IniManager(APP_NAME, config_path=config_path, **DEFAULTS)
@@ -242,6 +255,48 @@ def test_main_launches_the_tui(monkeypatch, config_path):
     assert kwargs['sort'] == SORT_BY_VERSION
     assert kwargs['packages'] == ['demo']
     assert kwargs['ini'].vals.packages == 'demo'
+
+
+def test_the_tool_check_uses_the_path(monkeypatch):
+    monkeypatch.setattr(
+        cli.shutil, 'which',
+        lambda name: '/usr/bin/pypi-cleanup' if name == cli.CLEANUP_TOOL else None,
+    )
+    assert cli.cleanup_tool_available() is True
+
+    monkeypatch.setattr(cli.shutil, 'which', lambda name: None)
+    assert cli.cleanup_tool_available() is False
+
+
+def test_a_missing_cleanup_tool_stops_the_run(monkeypatch, capsys, config_path):
+    monkeypatch.setattr(cli, 'cleanup_tool_available', lambda: False)
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo'], config_path=config_path) == 1
+
+    err = capsys.readouterr().err
+    assert 'pypi-cleanup' in err
+    assert '--read-only' in err
+    # The table never opens, and the failed run stores no package.
+    assert seen == []
+    assert stored(config_path).vals.packages == ''
+
+
+def test_read_only_skips_the_cleanup_tool_check(monkeypatch, config_path):
+    monkeypatch.setattr(cli, 'cleanup_tool_available', lambda: False)
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo', '--read-only'], config_path=config_path) == 0
+
+    assert seen[0][1]['read_only'] is True
+
+
+def test_a_normal_run_is_not_read_only(monkeypatch, config_path):
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo'], config_path=config_path) == 0
+
+    assert seen[0][1]['read_only'] is False
 
 
 # --- what the command line remembers --------------------------------------
@@ -329,6 +384,42 @@ def test_the_stored_sort_and_zone_are_used_at_startup(monkeypatch, config_path):
     assert kwargs['zone'] == LOCAL_MODE
 
 
+def test_the_gap_is_stored_and_passed_on(monkeypatch, config_path):
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo'], config_path=config_path) == 0
+
+    _, kwargs = seen[0]
+    assert kwargs['gap'] == cli.DEFAULT_GAP
+    assert stored(config_path).vals.gap == cli.DEFAULT_GAP
+
+
+def test_the_stored_gap_is_used_at_startup(monkeypatch, config_path):
+    stored(config_path, gap=7)
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo'], config_path=config_path) == 0
+
+    assert seen[0][1]['gap'] == 7
+
+
+def test_an_unknown_stored_gap_falls_back_to_the_default(monkeypatch, config_path):
+    stored(config_path, gap=5)
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo'], config_path=config_path) == 0
+
+    assert seen[0][1]['gap'] == cli.DEFAULT_GAP
+    # The fallback is written back, so the bad number does not return.
+    assert stored(config_path).vals.gap == cli.DEFAULT_GAP
+
+
+def test_a_gap_that_is_not_a_number_falls_back_to_the_default():
+    assert cli._normalise_gap('7') == 7
+    assert cli._normalise_gap('soon') == cli.DEFAULT_GAP
+    assert cli._normalise_gap(None) == cli.DEFAULT_GAP
+
+
 def test_the_theme_switch_is_stored_and_passed_on(monkeypatch, config_path):
     monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
     seen = capture_tui(monkeypatch)
@@ -390,7 +481,8 @@ def test_the_stored_theme_and_no_color_are_used_at_startup(monkeypatch, config_p
 def test_a_hand_edited_config_falls_back_to_known_values(monkeypatch, config_path):
     config_path.write_text(
         '[options]\nuser = \nhost = elsewhere\npackages = demo\n'
-        'zone = Mars\nsort = size\ntheme = nonsense\nno_color = maybe\n',
+        'zone = Mars\nsort = size\ngap = soon\ntheme = nonsense\n'
+        'no_color = maybe\n',
         encoding='utf-8',
     )
     monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
@@ -402,6 +494,8 @@ def test_a_hand_edited_config_falls_back_to_known_values(monkeypatch, config_pat
     assert cleanup.host_key == 'pypi'
     assert kwargs['sort'] == SORT_BY_VERSION
     assert kwargs['zone'] == UTC_MODE
+    assert kwargs['gap'] == cli.DEFAULT_GAP
+    assert stored(config_path).vals.gap == cli.DEFAULT_GAP
     assert stored(config_path).vals.theme == ''
     assert stored(config_path).vals.no_color is False
 

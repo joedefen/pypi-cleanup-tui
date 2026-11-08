@@ -80,7 +80,8 @@ def _mixed():
 
 
 def _app(cleanup=None, rows=20, cols=100, ini=None, zone=None,
-         theme=None, no_color=None, sort=None, packages=None):
+         theme=None, no_color=None, sort=None, gap=None, read_only=None,
+         packages=None):
     return tui_mod.CleanupApp(
         cleanup or _cleanup(),
         backend=HeadlessBackend(rows=rows, cols=cols),
@@ -90,6 +91,8 @@ def _app(cleanup=None, rows=20, cols=100, ini=None, zone=None,
         theme=theme,
         no_color=no_color,
         sort=sort or SORT_BY_VERSION,
+        gap=gap if gap is not None else tui_mod.DEFAULT_GAP,
+        read_only=bool(read_only),
         packages=packages,
     )
 
@@ -205,7 +208,7 @@ def test_main_screen_draws_three_header_lines_and_one_row_per_release():
         # the pick is on an unmarked row, so the marking pair is offered.
         assert app.win.head.texts[0] == (
             f'    x:mark X:mark{tui_mod.DOWN_MARK} '
-            f'sort zone quit ?:help /')
+            f'sort zone gap30 quit ?:help /')
         # The summary is a fancy header: [p] and [h] are key styled, User is
         # literal.  It is not dimmed, unlike the hint and column lines.
         assert app.win.head.texts[1] == 'User=alice pack=demo host=pypi'
@@ -315,8 +318,8 @@ def test_the_hint_line_keeps_its_shape_as_the_pick_changes_state():
 
         # The words swap, but the blocks keep their width: the keys to the
         # right stay in the same columns.
-        assert unmarked.endswith('sort zone quit ?:help /')
-        assert marked.endswith('sort zone quit ?:help /')
+        assert unmarked.endswith('sort zone gap30 quit ?:help /')
+        assert marked.endswith('sort zone gap30 quit ?:help /')
         assert len(unmarked) == len(marked)
     finally:
         app.win.stop_curses()
@@ -1400,24 +1403,105 @@ def test_help_from_the_package_list_returns_to_it():
         app.win.stop_curses()
 
 
-# --- the d placeholder ----------------------------------------------------
+# --- the d hand-off -------------------------------------------------------
 
-def test_d_flashes_the_pending_deletion_count(monkeypatch):
+def test_the_cleanup_command_names_the_marked_versions():
+    cleanup = CleanupTui('demo', user='alice')
+
+    command = tui_mod.cleanup_command(cleanup, ['2.0', '1.0'])
+
+    # The versions become one anchored expression, with the dots literal, so
+    # the command names exactly the rows the table showed.
+    assert command == [
+        'pypi-cleanup', '-u', 'alice', '-p', 'demo', '-r', '^(2\\.0|1\\.0)$',
+    ]
+
+
+def test_the_cleanup_command_falls_back_to_the_login_name(monkeypatch):
+    monkeypatch.setenv('USER', 'login')
+
+    command = tui_mod.cleanup_command(CleanupTui('demo'), ['1.0'])
+
+    assert command[command.index('-u') + 1] == 'login'
+
+
+def test_the_printed_command_is_quoted_for_a_shell():
+    assert (tui_mod.format_command(['pypi-cleanup', '-r', '^(1.0)$'])
+            == "+ pypi-cleanup -r '^(1.0)$'")
+
+
+def test_the_prompt_is_decorated_and_waits_for_enter(monkeypatch):
+    prompts = []
+    monkeypatch.setattr('builtins.input', lambda prompt='': prompts.append(prompt))
+
+    tui_mod.press_enter()
+
+    assert prompts == ['\n\n===== Press ENTER to return to the TUI ====> ']
+
+
+def test_the_terminal_is_cleared_after_curses(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tui_mod.os, 'system', calls.append)
+
+    tui_mod._reset_terminal()
+
+    assert calls == ['clear; stty sane']
+
+
+def test_d_hands_the_marked_versions_to_pypi_cleanup(monkeypatch):
     cleanup = _cleanup3()
     cleanup.versions[0].delete = True
     cleanup.versions[2].delete = True
     app = _app(cleanup)
-    calls = []
+    commands = []
     try:
         _draw(app)
-        monkeypatch.setattr(
-            app.win, 'flash',
-            lambda message, duration=0: calls.append((message, duration)),
-        )
+        monkeypatch.setattr(app, 'hand_off_to_cleanup', commands.append)
 
         _press(app, ord('d'))
 
-        assert calls == [('To delete 2 versions [TODO]', 2.0)]
+        assert commands == [[
+            'pypi-cleanup', '-u', 'alice', '-p', 'demo',
+            '-r', '^(2\\.0|1\\.0)$',
+        ]]
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_hand_off_prints_the_command_and_waits_for_enter(monkeypatch, capsys):
+    app = _app()
+    resets, prompts = [], []
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal',
+                            lambda: resets.append(True))
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: prompts.append(True))
+
+        app.hand_off_to_cleanup(['pypi-cleanup', '-p', 'demo'])
+
+        assert resets == [True]
+        assert prompts == [True]
+        assert '+ pypi-cleanup -p demo' in capsys.readouterr().out
+        # The window left curses for the command and is attached again after.
+        assert app.win.suspended is False
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_hand_off_comes_back_even_if_the_prompt_fails(monkeypatch):
+    app = _app()
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+
+        def interrupted():
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(tui_mod, 'press_enter', interrupted)
+
+        with pytest.raises(KeyboardInterrupt):
+            app.hand_off_to_cleanup(['pypi-cleanup', '-p', 'demo'])
+
+        # The finally clause must not leave the terminal in the bare state.
+        assert app.win.suspended is False
     finally:
         app.win.stop_curses()
 
@@ -1427,7 +1511,7 @@ def test_d_does_nothing_when_nothing_is_marked(monkeypatch):
     calls = []
     try:
         _draw(app)
-        monkeypatch.setattr(app.win, 'flash', lambda *args, **kwargs: calls.append(args))
+        monkeypatch.setattr(app, 'hand_off_to_cleanup', calls.append)
 
         _press(app, ord('d'))
 
@@ -1484,8 +1568,7 @@ def test_d_is_inert_while_a_pattern_is_in_force(monkeypatch):
     calls = []
     try:
         _draw(app)
-        monkeypatch.setattr(app.win, 'flash',
-                            lambda *args, **kwargs: calls.append(args))
+        monkeypatch.setattr(app, 'hand_off_to_cleanup', calls.append)
         _press(app, ord('/'))
         _press(app, ord('1'))
         _press(app, 10)
@@ -1494,6 +1577,234 @@ def test_d_is_inert_while_a_pattern_is_in_force(monkeypatch):
         _press(app, ord('d'))
 
         assert calls == []
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_read_only_run_shows_ro_where_d_would_be():
+    cleanup = _cleanup3()
+    cleanup.versions[0].delete = True
+    app = _app(cleanup, read_only=True)
+    try:
+        _draw(app)
+
+        # The pick is on a marked row, so the rest of the line is the u/U pair.
+        assert app.win.head.texts[0].startswith('R/O unmark')
+        # The block is as wide as "del", so the keys to its right stay put.
+        assert len(tui_mod.READ_ONLY_HINT) == len(tui_mod.DEL_HINT)
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_read_only_run_never_offers_d(monkeypatch):
+    cleanup = _cleanup3()
+    cleanup.versions[0].delete = True
+    app = _app(cleanup, read_only=True)
+    calls = []
+    try:
+        _draw(app)
+        monkeypatch.setattr(app, 'hand_off_to_cleanup', calls.append)
+
+        _press(app, ord('d'))
+
+        assert calls == []
+    finally:
+        app.win.stop_curses()
+
+
+# --- the g stability gap --------------------------------------------------
+
+def _history(*days_ago):
+    """A history whose newest release is *days_ago[0]* days old."""
+    cleanup = CleanupTui('demo', user='alice')
+    cleanup.versions = [
+        Release(f'v{index}', NOW - timedelta(days=days))
+        for index, days in enumerate(days_ago)
+    ]
+    return cleanup
+
+
+def test_stable_releases_keeps_the_versions_that_stayed_current():
+    cleanup = _history(0, 5, 40, 50)
+    for release in cleanup.versions:
+        release.delete = True
+
+    stable = tui_mod.stable_releases(cleanup.versions, 30)
+
+    # v0 is the newest, so nothing followed it, and v2 was current for 35 days;
+    # v1 was superseded after 5 days and v3 after 10, so both stay marked.
+    assert [release.version for release in stable] == ['v0', 'v2']
+
+
+def test_the_gap_decides_which_versions_count_as_stable():
+    cleanup = _history(0, 5, 40, 50)
+    for release in cleanup.versions:
+        release.delete = True
+
+    assert len(tui_mod.stable_releases(cleanup.versions, 3)) == 4
+    assert len(tui_mod.stable_releases(cleanup.versions, 7)) == 3
+    assert len(tui_mod.stable_releases(cleanup.versions, 30)) == 2
+
+
+def test_the_hint_line_shows_the_gap_in_force():
+    app = _app()
+    try:
+        _draw(app)
+        assert 'gap30 ' in app.win.head.texts[0]
+
+        app.opts.gap = 7
+        app.win.clear()
+        _draw(app)
+        # The block keeps its width across one- and two-digit gaps, so the
+        # keys to its right stay in the same columns.
+        assert app.win.head.texts[0].endswith('gap7  quit ?:help /')
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_gap_reads_upload_times_not_the_table_order():
+    cleanup = CleanupTui('demo', user='alice')
+    cleanup.versions = [
+        Release('2.0', NOW - timedelta(days=35)),
+        Release('1.1', NOW - timedelta(days=40)),
+    ]
+    for release in cleanup.versions:
+        release.delete = True
+
+    # 2.0 was uploaded later, so it is the newest release and is kept; the
+    # row order the table happens to show must not decide that.
+    for order in (cleanup.versions, list(reversed(cleanup.versions))):
+        assert [release.version for release in
+                tui_mod.stable_releases(order, 30)] == ['2.0']
+
+
+def test_g_judges_the_whole_history_while_the_table_is_filtered(monkeypatch):
+    cleanup = _history(0, 5, 40, 50)
+    for release in cleanup.versions:
+        release.delete = True
+    app = _app(cleanup)
+    try:
+        _draw(app)
+        monkeypatch.setattr(app.win, 'flash', lambda *args, **kwargs: None)
+        _press(app, ord('/'))
+        _press(app, ord('v'))
+        _press(app, ord('0'))
+        _press(app, 10)
+
+        _press(app, ord('g'))
+
+        # v2 is kept even though the pattern hides it: how quickly a release
+        # was superseded is a fact about the package, not about the filter.
+        assert [release.delete for release in cleanup.versions] == [
+            False, True, False, True]
+    finally:
+        app.win.stop_curses()
+
+
+def test_stable_releases_ignores_the_versions_that_are_not_marked():
+    cleanup = _history(0, 5, 40, 50)
+    cleanup.versions[1].delete = True
+
+    assert tui_mod.stable_releases(cleanup.versions, 30) == []
+
+
+def test_g_keeps_the_marked_releases_that_stayed_stable(monkeypatch):
+    cleanup = _history(0, 5, 40, 50)
+    for release in cleanup.versions:
+        release.delete = True
+    app = _app(cleanup)
+    calls = []
+    try:
+        _draw(app)
+        monkeypatch.setattr(
+            app.win, 'flash',
+            lambda message, duration=0: calls.append((message, duration)),
+        )
+
+        _press(app, ord('g'))
+
+        assert [release.delete for release in cleanup.versions] == [
+            False, True, False, True]
+        assert calls == [('Kept 2 of 4 marked versions, gap 30 days', 2.0)]
+    finally:
+        app.win.stop_curses()
+
+
+def test_g_rotates_the_gap_on_the_help_screen():
+    app = _app()
+    try:
+        app.opts.help_screen = True
+        app.stack.perform_actions(app.spin)
+        assert app.opts.gap == tui_mod.DEFAULT_GAP
+
+        _press(app, ord('g'))
+        assert app.opts.gap == tui_mod.GAP_CHOICES[-1]
+
+        _press(app, ord('g'))
+        assert app.opts.gap == tui_mod.GAP_CHOICES[0]
+
+        app.win.clear()
+        app.screens[tui_mod.HELP_ST].draw_screen()
+        assert 'g - stability gap, in days' in '\n'.join(app.win.body.texts)
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_starting_gap_is_the_one_the_run_was_handed():
+    # main() reads the store and normalises the value before it builds the app,
+    # so the constructor only has to seed the option with it.
+    app = _app(gap=7)
+    try:
+        _draw(app)
+
+        assert app.opts.gap == 7
+        assert 'gap7 ' in app.win.head.texts[0]
+    finally:
+        app.win.stop_curses()
+
+
+def test_an_unknown_starting_gap_falls_back_to_the_default():
+    # A hand-edited gap that is not one of the choices must not reach the
+    # stability filter.
+    app = _app(gap=5)
+    try:
+        _draw(app)
+
+        assert app.opts.gap == tui_mod.DEFAULT_GAP
+        assert 'gap30 ' in app.win.head.texts[0]
+    finally:
+        app.win.stop_curses()
+
+
+def test_g_stores_the_gap_for_the_next_run(tmp_path):
+    ini = _ini(tmp_path)
+    app = _app(ini=ini)
+    try:
+        app.opts.help_screen = True
+        app.stack.perform_actions(app.spin)
+
+        _press(app, ord('g'))
+
+        assert app.opts.gap == tui_mod.GAP_CHOICES[-1]
+        assert ini.vals.gap == tui_mod.GAP_CHOICES[-1]
+        # The choice reaches the file, so the next run starts with it.
+        assert _ini(tmp_path).vals.gap == tui_mod.GAP_CHOICES[-1]
+    finally:
+        app.win.stop_curses()
+
+
+def test_g_does_nothing_off_the_table_and_the_help_screen():
+    cleanup = _history(0, 5, 40, 50)
+    for release in cleanup.versions:
+        release.delete = True
+    app = _app(cleanup)
+    try:
+        app.stack.push(tui_mod.PACKAGES_ST)
+
+        _press(app, ord('g'))
+
+        assert app.opts.gap == tui_mod.DEFAULT_GAP
+        assert all(release.delete for release in cleanup.versions)
     finally:
         app.win.stop_curses()
 
@@ -1615,16 +1926,73 @@ def test_help_screen_lists_the_selection_and_zone_keys():
                      'z - date time zone', 's - change the sort order',
                      'p - next package', 'h - switch index', 'P - package list',
                      'T - themes', '/ - incremental search',
-                     'x - remove from the package list',
+                     'x - remove from the package list [Package Screen]',
                      'ESC - back, or open the picked package',
-                     'd - delete the marked versions (TODO)'):
+                     'd - delete the marked versions with pypi-cleanup',
+                     'g - stability gap, in days',
+                     'g - keep the releases that stayed stable [Main Screen]'):
             assert hint in text
         assert tui_mod.UTC_MODE in text
         assert tui_mod.LOCAL_MODE in text
         assert 'Color theme' in text
         assert 'visible rows only' in text
         assert 'working package list' in text
+        # The bullets are wrapped, so compare them with the breaks removed.
+        assert 'newest release counts as stable' in ' '.join(text.split())
+        assert 'leaves the table for the terminal' in ' '.join(text.split())
+        assert '--read-only' in text
+        # The notes read as a bulleted list with a hanging indent.
+        assert any(line.startswith('* Color theme') for line in app.win.body.texts)
+        assert any(line.startswith('  ') for line in app.win.body.texts)
     finally:
+        app.win.stop_curses()
+
+
+def test_the_help_screen_lists_the_cycles_before_the_other_keys():
+    app = _app()
+    try:
+        app.screens[tui_mod.HELP_ST].draw_screen()
+
+        body = app.win.body.texts
+
+        def row(hint):
+            return next(index for index, line in enumerate(body)
+                        if line.startswith(hint))
+
+        assert row('q - quit') < row('? - help')
+        for hint in ('z - date time zone', 't - cycle themes',
+                     'g - stability gap, in days'):
+            assert row('? - help') < row(hint) < row('x - mark this release')
+        assert row('x - mark this release') < row(
+            'x - remove from the package list [Package Screen]')
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_help_screen_names_the_read_only_mode():
+    app = _app(read_only=True)
+    try:
+        app.screens[tui_mod.HELP_ST].draw_screen()
+
+        text = ' '.join('\n'.join(app.win.body.texts).split())
+        assert 'd - delete the marked versions (read-only mode)' in text
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_help_screen_can_add_the_symbol_note():
+    app = _app()
+    try:
+        screen = app.screens[tui_mod.HELP_ST]
+        # The base screen offers this note; this app leaves it off, but the
+        # bulleted notes must still fold it in when it is turned on.
+        screen.show_display_notes = True
+        screen.draw_screen()
+
+        assert any(line.startswith('* Symbols')
+                   for line in app.win.body.texts)
+    finally:
+        screen.show_display_notes = False
         app.win.stop_curses()
 
 
