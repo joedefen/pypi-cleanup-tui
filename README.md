@@ -1,25 +1,43 @@
 > **UNDER DEVELOPMENT --- BE PATIENT**
+
 # pypi-cleanup-tui
 
-A thin, visual skin over [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/), the command line tool for deleting PyPI releases: this TUI hands it the marked versions, but makes choosing which versions to keep visual and regex-free -- a selection that is easier to review and less error prone than hand-written patterns.
+A thin, visual skin over [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/), which performs the actual deletion. Consider using:
+
+- this TUI to cull per-version and visually: selecting by hand, with the survivors in view;
+- `pypi-cleanup` directly when cull rules are expressible and reusable (`.*rc\d+`, keep-newest, before-a-date), especially for automation across many packages.
+
+```text
+ del x:mark X:mark▼ sort zone gap60 quit ?:help /
+ User=betazoid pack=vappman host=pypi
+ DEL DATE (UTC)        DAYS  *VERSION
+────────────────────────────────
+     2026/11/06 22:04     1  2.2.2
+     2026/10/31 18:13     7  2.2.1
+  ✘  2026/10/28 00:07    10  2.2.0
+>    2026/10/13 02:05    25  2.1.7
+     2026/03/01 19:37   251  2.1.6
+```
+
+*The main screen (a mock-up; a GIF is planned). One release is marked `✘` and the pick sits on `2.1.7`. `x` marks a release, `X` marks everything below the pick, `d` previews and then performs the deletion, `?` lists every key, and `p` moves to the next package.*
 
 ## Features
 
-- A visual release table with the `DEL`, `DATE`, `DAYS` and `VERSION` columns: mark releases with `x`, mark a whole range below the pick with `X`, and unmark with `u`/`U`.
-- Cycle through your packages without retyping names: `p` shows the next package, `P` opens the package list, and `x` removes a name from this run's list.
-- A stability gap (`g`) that keeps the releases which stayed current long enough to be installed -- 3, 7, 14, 30 or 60 days.
-- Incremental, case-insensitive search (`/`) over the version column; once the pattern is closed, marking keys touch only the visible rows.
-- Sort by version or upload date (`s`), switch the `DATE` column between UTC and local time (`z`), and switch between pypi.org and test.pypi.org (`h`).
-- A dry run before every deletion: `d` runs `pypi-cleanup --query-only`, shows the command and its report, then asks again before the `--do-it` deletion.
-- Browse-only mode (`--read-only`) that disarms the delete key and needs no `pypi-cleanup` install.
-- Themes, a `mono`/`--no-color` mode, and remembered options so the next run starts with the same packages, index, zone, sort order, gap and theme.
-- Built with Python 3.10+.
+- A package's whole history in one table, with upload date and age in calendar days (yesterday counts as 1, counted in the zone `z` shows), so a stale release is visible instead of inferred from a version number.
+- Mark with `x`, mark a whole run below the pick with `X`, clear with `u`/`U` -- a selection you can see, with no pattern to get wrong.
+- A stability gap (`g`) keeps the releases that stayed current for 3, 7, 14, 30 or 60 days: the ones people actually installed.
+- Search (`/`) over the versions, after which the marking keys touch only the visible rows.
+- Move between packages with `p`/`P`, between indexes with `h`, sort with `s`, change the date zone with `z`.
+- Every deletion is a dry run first, with the command and its report shown before a second confirmation; `--read-only` browses with no delete key and no `pypi-cleanup` install.
 
 ## Installation
 
 ```bash
-pip install pypi-cleanup-tui
+pipx install -f pypi-cleanup-tui   # install or refresh; -f makes one command do both
+pipx install -f pypi-cleanup       # the tool the TUI hands the deletion to
 ```
+
+> **Note:** pipx gives the TUI its own environment; the package itself needs Python 3.11 or newer. The TUI exposes only part of [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/); for anything it lacks, run that tool directly. `--read-only` browses without it installed.
 
 ## Usage
 
@@ -36,11 +54,9 @@ pypi-cleanup-tui --no-color pack1    # attributes instead of color; remembered
 pypi-cleanup-tui --read-only pack1   # browse only: no delete key, no checks
 ```
 
-The first name is the package the table opens, and the rest of the list is kept for `p` and for the next run. Package arguments are cumulative: a run puts its names in front of the remembered list and drops duplicates, keeping the first occurrence.
+The first name is the package the table opens; the rest is kept for `p` and for the next run. Package arguments are cumulative: a run puts its names in front of the remembered list and drops duplicates, keeping the first occurrence.
 
 ### Main screen
-
-The release table opens in the terminal:
 
 | Key | Action |
 | --- | ------ |
@@ -61,29 +77,24 @@ The release table opens in the terminal:
 | `d` | leave the table, run a `pypi-cleanup` dry run, then the deletion after a second confirmation |
 | `g` | apply the stability gap on the table; on the help screen, rotate the gap instead |
 
-The second header line summarises the run: `User=...`, `[p]ack=...` and `[h]ost=...`. `User` is read-only and shows `n/a` until `-u` is given; `p` rotates through the package list and `h` switches the index, reloading the table in both cases. `host` shows the index key (`pypi` or `test`), not its domain name.
+The second header line is the run: `User=...`, `[p]ack=...` and `[h]ost=...`. `User` shows `n/a` until `-u` is given, `host` shows the index key (`pypi` or `test`) rather than a domain, and `p` and `h` each reload the table. The body then loads: `Loading ...` first, releases after; a failed load opens a modal with the error and leaves the body empty for another package or index.
 
-The table loads after it opens: the body shows `Loading ...` in the hot-swap colour, then the releases appear. `p` does not reload when the list holds only one package. A failed load opens a modal alert with the error details; dismissing it leaves the body empty, ready for another package or index.
+Marked releases take `✘` in `DEL` and dim their other cells, while the releases that will be kept stay in the success color, so both halves of the decision are visible at once. `T` lists the palettes with swatches; its last entry, `mono`, is not a palette but the switch that turns color off, exactly like `--no-color` and the `NO_COLOR` convention, and choosing a palette turns it back on.
 
-The first header line always ends with a search field: a bare `/` before anything is typed, then `/pattern` after a search. Pressing `/` opens it and typing filters the releases as you go. The pattern is a case-insensitive regular expression matched against the version column, the same shape as vappman's filter: `^1\.` selects the 1.x releases and `[ab]` is a character class. An empty pattern -- or one that does not compile yet, such as a lone `[` while it is being typed -- leaves the table unfiltered. `ENTER` accepts the pattern and `ESC` restores the text the search started with. Once the pattern is closed, `x`, `X`, `u` and `U` apply to the visible rows only, so a filtered table can be marked without touching the hidden releases.
-
-A marked release shows `✘` in the `DEL` column and its remaining cells are dimmed; the marker itself stays plain so it is still easy to read. While anything is marked, the releases that will be kept are drawn in the success colour, so both halves of the decision are visible at once.
-
-The column titles sit in a third, dim header line above the table (with no rule under it), and the `DATE` title names the zone in force, e.g. `DATE (UTC)` or `DATE (EDT)` after pressing `z`. The sorted column carries a `*` before its title: `*VERSION` by default, or `*DATE (UTC)` after `s` switches to upload-date order.
-
-The first header line is made of space separated blocks, and a block that does not apply is blanked instead of removed, so its width never changes and the keys to its right never move:
+The column titles are a dim third line, the sorted column carries a `*` (`*VERSION`, or `*DATE (UTC)` after `s`), and the `DATE` title names the zone in force (`DATE (EDT)` after `z`). The keys on the first line are blocks, and a block that does not apply is blanked rather than removed, so nothing to its right moves:
 
 ```text
-    x:mark X:mark▼ sort zone gap30 quit ?:help /     nothing marked, unmarked row
+x:mark X:mark▼ sort zone gap30 quit ?:help /     nothing marked, unmarked row
 del unmark Unmark▼ sort zone gap30 quit ?:help /     marked, pick on a marked row
 R/O unmark Unmark▼ sort zone gap30 quit ?:help /     read-only, d never offered
 ```
 
-The marking pair and the unmarking pair are the same width, and the row under the pick chooses between them: an unmarked row offers `x`/`X`, a marked row offers `u`/`U`. `X` therefore only marks down from an unmarked row, and `U` only unmarks down from a marked row. `del` leads the line once something is marked and no pattern is filtering the table -- a filter can hide marked releases, so `d` is inert while one is in force. A `--read-only` run fills that same block with `R/O` and never offers `d` at all. The search field at the end is the one block whose width follows its text. The theme key is listed on the help screen only; `gap30` is the stability gap in force, and pressing `g` applies it.
+An unmarked row offers `x`/`X` and a marked row offers `u`/`U`, the two pairs have the same width, and the row under the pick chooses between them. `del` leads once something is marked and no pattern is filtering -- a filter can hide marked releases, so `d` is inert while one is in force. `--read-only` fills that block with `R/O` and never offers `d`. The search field is the one block whose width follows its text, and the theme key is listed on the help screen only.
 
-`g` is the stability filter, and it means something different on each screen: on the help screen it rotates the gap -- 3, 7, 14, 30 or 60 days; a first run starts at 30 -- and on the table it applies the current gap. Every marked release that no other release followed within that many days is unmarked, so the releases that stayed current long enough to be the one people installed are kept; the newest release counts as stable as well, because nothing followed it at all. The table judges the whole history, not just the visible rows -- how quickly a release was superseded is a fact about the package -- and `g` only ever unmarks, so a hidden release cannot be swept up by it. The hint line shows the gap in force as `gap30`, and a two-second message box reports how many of the marked releases were kept. The gap is one of the remembered options, so the next run starts with the value the last one ended with.
+### Search and the stability gap
 
-The THEMES screen shows the palette names and their swatches. Its last entry, `mono`, is not a palette: choosing it turns semantic color off, exactly like `--no-color` (and the `NO_COLOR` convention), while a palette turns color back on. The swatches follow that switch, so `mono` previews what the table looks like without color.
+- `/` filters on a case-insensitive regular expression over the version column -- `^1\.` for the 1.x releases, `[ab]` for a character class. An empty or not-yet-valid pattern (a lone `[` while it is being typed) leaves the table unfiltered; `ENTER` accepts, `ESC` restores the text the search started with. While a pattern is closed, `x`, `X`, `u` and `U` apply to the visible rows only.
+- `g` means two things. On the help screen it rotates the stability gap -- 3, 7, 14, 30 or 60 days, starting at 30 -- and on the table it applies the gap in force: every marked release that another release superseded within that many days is unmarked, so what stays is what had time to be installed. The days are calendar days in the zone `z` shows, the same unit as the `DAYS` column, so switching zone can move a borderline release across the gap. The newest release counts as stable because nothing followed it. The test is over the whole history, not the visible rows, and `g` only ever unmarks, so a filter cannot hide a release from it. A two-second message reports how many marked releases were kept, and the gap is remembered for the next run.
 
 ### Package screen
 
@@ -97,9 +108,7 @@ PACKAGES  x:remove ESC:open ?:help
   gamma       -     -
 ```
 
-The untitled first column carries `✓` once this run has loaded that package; `VERs` is the number of releases its history held at that load, and `DELs` is the number of versions this run has deleted from it (a successful deletion run does not update this counter yet). Both numbers show `-` until the package is loaded, because the screen never invents a count.
-
-The screen opens with the pick on the package `p` would show next, so `ESC` -- which opens the picked package in the table and returns -- is one keypress from the table's package to the next one. `x` removes the picked name from the list: the index itself is untouched, so a removed package is simply no longer visited by `p` or remembered for the next run. With the list emptied there is nothing to open, so `ESC` leaves the program; `?` opens the help screen, whose `ESC` returns to the package list.
+The untitled first column carries `✓` once this run has loaded that package; `VERs` is the release count at that load and `DELs` the versions deleted this run (a successful deletion does not update the counter yet). Both show `-` until the package is loaded, because the screen never invents a count. The pick opens on the package `p` would show next, so `ESC` is one keypress from the table's package to the next; it opens that package in the table and returns. `x` removes the picked name from this run's list and leaves the index untouched. With the list emptied there is nothing to open, so `ESC` leaves the program; `?` opens the help screen, whose `ESC` returns to the list.
 
 ### Running `pypi-cleanup`
 
@@ -115,20 +124,14 @@ Pressing `d` leaves the table for the bare terminal, where it shows the `pypi-cl
 
 ### Options are remembered
 
-The user, the index, the package list, the settings the table itself can change (`z` for the date zone, `s` for the sort order, and the stability `gap` that `g` rotates on the help screen), and the appearance (`theme` and whether color is on) are stored in `~/.config/pypi-cleanup-tui/config.ini`. Every option's default is the stored value, so after the first run
+Your package list, sort order, date zone, gap, theme, user and index persist in `~/.config/pypi-cleanup-tui/config.ini`, so a bare `pypi-cleanup-tui` starts with you previous options. `--read-only` deliberately does not persist.
 
 ```bash
-pypi-cleanup-tui
+pypi-cleanup-tui newpack   # newpack, then the stored names
+pypi-cleanup-tui pack2     # an already stored name keeps its position
 ```
 
-re-opens the same package from the same index, with the same zone, order, stability gap and theme. The package list is kept as one comma separated value -- which is why the two spellings above are equivalent -- and the table still shows one package per run, the first in the list. `--read-only` is deliberately not remembered: it covers a single run, so a browse-only session can never quietly disarm the next one.
-
-```bash
-pypi-cleanup-tui newpack     # list becomes: newpack, then the stored names
-pypi-cleanup-tui pack2       # a name already stored keeps its first position
-```
-
-The help screen (`?`) lists the saved options and the file they came from.
+`?` lists the saved options and the file they came from.
 
 ## License
 

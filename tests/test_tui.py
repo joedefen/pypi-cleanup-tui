@@ -8,7 +8,7 @@ whatever terminal happens to run them.
 from __future__ import annotations
 
 import curses
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from console_window import Theme, appearance
@@ -26,7 +26,7 @@ from pypi_cleanup_tui.main import (
     Release,
 )
 
-NOW = datetime(2024, 5, 1, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2024, 5, 1, 12, 0, tzinfo=UTC)
 EDT = timezone(timedelta(hours=-4), 'EDT')
 
 
@@ -34,7 +34,7 @@ EDT = timezone(timedelta(hours=-4), 'EDT')
 def _headless_curses_stubs(monkeypatch):
     # curses.has_colors() and curses.color_pair() raise until initscr() has
     # succeeded; the window's theme setup may still probe them.  The ACS
-    # constants are absent on a curses build that never initialised a screen,
+    # constants are absent on a curses build that never initialized a screen,
     # yet render() draws the header/body separator with ACS_HLINE.
     monkeypatch.setattr(curses, 'has_colors', lambda: False, raising=False)
     monkeypatch.setattr(curses, 'color_pair', lambda n=0: n << 8, raising=False)
@@ -159,6 +159,33 @@ def test_zone_abbrev_switches_with_the_mode():
 def test_days_ago_never_goes_negative():
     assert tui_mod.days_ago(Release('3.0', NOW - timedelta(days=3)), NOW) == 3
     assert tui_mod.days_ago(Release('3.0', NOW + timedelta(days=1)), NOW) == 0
+
+
+def test_days_ago_counts_dates_not_elapsed_hours():
+    late = datetime(2024, 4, 30, 23, 59, tzinfo=UTC)
+    early = datetime(2024, 5, 1, 0, 1, tzinfo=UTC)
+
+    assert tui_mod.days_ago(Release('3.0', late), early) == 1
+    assert tui_mod.days_ago(Release('3.0', early), late) == 0
+
+
+def test_days_ago_counts_in_the_zone_the_table_shows():
+    # 03:00 UTC on 1 May is 23:00 on 30 April in EDT, so the local calendar
+    # makes the release one day old where the UTC calendar makes it zero.
+    release = Release('1.0', datetime(2024, 5, 1, 3, 0, tzinfo=UTC))
+
+    assert tui_mod.days_ago(release, NOW) == 0
+    assert tui_mod.days_ago(release, NOW, tui_mod.LOCAL_MODE, EDT) == 1
+
+
+def test_format_row_counts_days_in_the_zone_the_date_is_shown_in():
+    # 03:00 UTC on 1 May is 23:00 on 30 April in EDT, so the row prints the
+    # earlier date and must call it one day old, not zero.
+    release = Release('1.0', datetime(2024, 5, 1, 3, 0, tzinfo=UTC))
+
+    row = tui_mod.format_row(release, NOW, tui_mod.LOCAL_MODE, EDT)
+
+    assert row.split()[:3] == ['2024/04/30', '23:00', '1']
 
 
 def test_format_row_marks_deletion_and_formats_every_column():
@@ -1941,6 +1968,23 @@ def test_the_gap_decides_which_versions_count_as_stable():
     assert len(tui_mod.stable_releases(cleanup.versions, 30)) == 2
 
 
+def test_the_gap_counts_calendar_days_in_the_zone_the_table_shows():
+    cleanup = CleanupTui('demo', user='alice')
+    cleanup.versions = [
+        Release('2.0', datetime(2024, 5, 2, 4, 0, tzinfo=UTC)),
+        Release('1.0', datetime(2024, 5, 1, 3, 0, tzinfo=UTC)),
+    ]
+    for release in cleanup.versions:
+        release.delete = True
+
+    # In UTC the second release was followed one calendar day later, so it
+    # did not clear a one-day gap.  In EDT those same uploads are 30 April
+    # 23:00 and 2 May 00:00 -- two calendar days apart -- so it did.
+    assert tui_mod.stable_releases(cleanup.versions, 1) == [cleanup.versions[0]]
+    assert tui_mod.stable_releases(
+        cleanup.versions, 1, tui_mod.LOCAL_MODE, EDT) == cleanup.versions
+
+
 def test_the_hint_line_shows_the_gap_in_force():
     app = _app()
     try:
@@ -2046,7 +2090,7 @@ def test_g_rotates_the_gap_on_the_help_screen():
 
 
 def test_the_starting_gap_is_the_one_the_run_was_handed():
-    # main() reads the store and normalises the value before it builds the app,
+    # main() reads the store and normalizes the value before it builds the app,
     # so the constructor only has to seed the option with it.
     app = _app(gap=7)
     try:

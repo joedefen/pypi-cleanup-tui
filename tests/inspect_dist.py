@@ -23,11 +23,10 @@ from __future__ import annotations
 import re
 import sys
 import tarfile
+import tomllib
 import zipfile
 from email.parser import Parser
 from pathlib import Path
-
-import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 # This module is run as a script by CI (`python tests/inspect_dist.py`), so the

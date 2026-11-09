@@ -6,7 +6,7 @@ so the tests describe the parsing and sorting contract, not the index's state.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import requests
@@ -28,7 +28,7 @@ from pypi_cleanup_tui.main import (
     _parsed_version,
 )
 
-NOW = datetime(2024, 5, 1, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2024, 5, 1, 12, 0, tzinfo=UTC)
 
 
 def release(version: str, days: int = 0) -> Release:
@@ -51,7 +51,7 @@ class FakeResponse:
 # --- timestamps and versions ---------------------------------------------
 
 def test_parse_upload_time_normalizes_to_utc():
-    expected = datetime(2024, 5, 1, 12, 0, tzinfo=timezone.utc)
+    expected = datetime(2024, 5, 1, 12, 0, tzinfo=UTC)
 
     assert _parse_upload_time('2024-05-01T12:00:00Z') == expected
     assert _parse_upload_time('2024-05-01T12:00:00') == expected
@@ -150,8 +150,8 @@ def test_fetch_versions_skips_empty_releases_and_uses_the_oldest_file(monkeypatc
     releases = {item.version: item.uploaded for item in tui.fetch_versions()}
 
     assert set(releases) == {'1.0', '0.8'}
-    assert releases['1.0'] == datetime(2024, 5, 1, 9, 0, tzinfo=timezone.utc)
-    assert releases['0.8'] == datetime(2024, 4, 1, 0, 0, tzinfo=timezone.utc)
+    assert releases['1.0'] == datetime(2024, 5, 1, 9, 0, tzinfo=UTC)
+    assert releases['0.8'] == datetime(2024, 4, 1, 0, 0, tzinfo=UTC)
 
 
 def test_fetch_versions_names_the_missing_package(monkeypatch):
@@ -415,9 +415,9 @@ def test_an_unknown_stored_gap_falls_back_to_the_default(monkeypatch, config_pat
 
 
 def test_a_gap_that_is_not_a_number_falls_back_to_the_default():
-    assert cli._normalise_gap('7') == 7
-    assert cli._normalise_gap('soon') == cli.DEFAULT_GAP
-    assert cli._normalise_gap(None) == cli.DEFAULT_GAP
+    assert cli._normalize_gap('7') == 7
+    assert cli._normalize_gap('soon') == cli.DEFAULT_GAP
+    assert cli._normalize_gap(None) == cli.DEFAULT_GAP
 
 
 def test_the_theme_switch_is_stored_and_passed_on(monkeypatch, config_path):

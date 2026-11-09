@@ -31,7 +31,7 @@ import shutil
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -133,8 +133,8 @@ def _parse_upload_time(raw: str | None) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _parsed_version(release: Release) -> Version | None:
@@ -279,7 +279,7 @@ def merge_packages(
     ))
 
 
-def _normalise(value: str, allowed: Sequence[str], fallback: str) -> str:
+def _normalize(value: str, allowed: Sequence[str], fallback: str) -> str:
     """Return *value* if it is one of *allowed*, else *fallback*.
 
     The stored options are read from a file a user can edit, and argparse does
@@ -289,7 +289,7 @@ def _normalise(value: str, allowed: Sequence[str], fallback: str) -> str:
     return value if value in allowed else fallback
 
 
-def _normalise_gap(value: object) -> int:
+def _normalize_gap(value: object) -> int:
     """Return *value* as a gap if it is one of *GAP_CHOICES*, else the default.
 
     The stored gap is a number in a file a user can edit, so it gets the same
@@ -325,7 +325,7 @@ def _theme_choice(raw: str) -> str:
     return raw
 
 
-def _normalise_theme(value: str) -> str:
+def _normalize_theme(value: str) -> str:
     """Return *value* if the theme picker knows it, else no explicit theme.
 
     A hand-edited ``theme = nonsense`` falls back to the library default
@@ -440,13 +440,13 @@ def main(
         print(missing_cleanup_tool_message(), file=sys.stderr)
         return 1
 
-    host = _normalise(args.host, HOSTS, HOST_PYPI)
-    zone = _normalise(vals.zone, ZONES, UTC_MODE)
-    sort = _normalise(vals.sort, SORTS, SORT_BY_VERSION)
-    gap = _normalise_gap(vals.gap)
+    host = _normalize(args.host, HOSTS, HOST_PYPI)
+    zone = _normalize(vals.zone, ZONES, UTC_MODE)
+    sort = _normalize(vals.sort, SORTS, SORT_BY_VERSION)
+    gap = _normalize_gap(vals.gap)
     # The command line wins; without it the remembered choice is used, and a
     # hand-edited unknown name falls back to "no explicit theme".
-    theme = _normalise_theme(args.theme or vals.theme)
+    theme = _normalize_theme(args.theme or vals.theme)
     if args.no_color:
         no_color = True
     elif args.theme:

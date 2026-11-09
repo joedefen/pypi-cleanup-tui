@@ -727,7 +727,7 @@ def branch_plan(current: str | None, tips: dict[str, str | None], is_ancestor,
                 f'({tips[follower][:7]}) have diverged; merge or rebase until '
                 'one contains the other, then bless again')}
 
-    # Afterwards every branch sits at one commit, and origin has to be able to
+    # Afterward every branch sits at one commit, and origin has to be able to
     # fast-forward to it -- checked here, because the push happens last, after
     # the upload, when a refusal can no longer be undone.
     target = tips[follower] if align == current else tips[current]

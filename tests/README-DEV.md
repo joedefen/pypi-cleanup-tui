@@ -105,7 +105,7 @@ when the gate was adopted; raise it when the number rises, never lower it.
 
 The ruff selection is committed rather than inherited
 (`[tool.ruff.lint] select = ["E4", "E7", "E9", "F", "I", "UP", "B"]`,
-`target-version = "py310"`) so that no user or global configuration can change
+`target-version = "py311"`) so that no user or global configuration can change
 what the gate enforces.
 
 `pypi-cleanup-tui --version` is answered by the argument parser before any
@@ -232,7 +232,7 @@ Run it by hand on any built pair:
   `dev` extra with `build`, `twine>=7` and `packaging>=26`, a console script
   that answers `--version`, and a branch model -- here `branches = ["main"]`.
   The runtime `packaging` floor rose from `>=23` to `>=26` to match the gate's
-  own floor, and the licence metadata moved to the PEP 639 `license` expression
+  own floor, and the license metadata moved to the PEP 639 `license` expression
   with `license-files`.
 * [`tests/test_bless.py`](test_bless.py) pins the identity this tree derives and
   the inspector it uploads behind; what the gate itself does -- branch plan,

@@ -50,7 +50,7 @@ readme = "README.md"
 # them to disagree.
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = []
 keywords = ["pypi", "cleanup", "tui", "terminal"]
 classifiers = [
@@ -58,7 +58,6 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -133,15 +132,15 @@ omit = ["tests/*"]
 
 [tool.coverage.report]
 # Measured at 99%; the floor is a ratchet against new code arriving without a
-# test, not a target to optimise.  Raise it when the number rises.
+# test, not a target to optimize.  Raise it when the number rises.
 fail_under = 90
 show_missing = true
 
 [tool.ruff]
 # Keep the lint gate identical on every machine: no global or user config can
-# change which rules the gate enforces.  3.10 is the oldest interpreter
+# change which rules the gate enforces.  3.11 is the oldest interpreter
 # `requires-python` allows.
-target-version = "py310"
+target-version = "py311"
 line-length = 100
 extend-exclude = ["build", "dist", ".venv"]
 

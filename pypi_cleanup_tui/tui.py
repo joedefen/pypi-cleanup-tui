@@ -102,7 +102,7 @@ import re
 import subprocess
 import textwrap
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -423,14 +423,33 @@ def _reset_terminal() -> None:
     os.system('clear; stty sane')
 
 
-def days_ago(release: Release, now: datetime | None = None) -> int:
-    """Whole days between *release*'s upload time and *now* (UTC).
+def days_since(uploaded: datetime, now: datetime | None = None,
+               mode: str = UTC_MODE, local_tz: tzinfo | None = None) -> int:
+    """Calendar days between *uploaded* and *now*, ignoring the time of day.
 
-    A clock skewed into the future would otherwise produce a negative age; the
-    table shows ``0`` for a release that is not older than the current moment.
+    The dates are compared, not the elapsed hours, so ``1`` always means
+    yesterday: a release uploaded at 23:59 is one day old at 00:01 the next
+    day, not zero.  Both timestamps are read in the zone *mode* selects, so the
+    count agrees with the DATE cell printed beside it: 03:00 UTC on 1 May is
+    23:00 on 30 April in EDT and counts as one day old, not zero.  A clock
+    skewed into the future would otherwise produce a negative count; the table
+    shows ``0`` for a date that is not before the current one.
     """
-    now = now or datetime.now(timezone.utc)
-    return max((now - release.uploaded).days, 0)
+    now = now or datetime.now(UTC)
+    if mode == LOCAL_MODE:
+        uploaded = uploaded.astimezone(local_tz)
+        now = now.astimezone(local_tz)
+    return max((now.date() - uploaded.date()).days, 0)
+
+
+def days_ago(release: Release, now: datetime | None = None,
+             mode: str = UTC_MODE, local_tz: tzinfo | None = None) -> int:
+    """Calendar days between *release*'s upload date and *now*'s date.
+
+    The zone argument is the same one that formats the table, so the count
+    follows the ``z`` switch.
+    """
+    return days_since(release.uploaded, now, mode, local_tz)
 
 
 def zone_abbrev(mode: str, now: datetime | None = None,
@@ -455,7 +474,7 @@ def format_row(release: Release, now: datetime | None = None,
     return (
         f"{marker:^{DEL_WIDTH}} "
         f"{uploaded:%Y/%m/%d %H:%M} "
-        f"{days_ago(release, now):>{DAYS_WIDTH}}"
+        f"{days_since(release.uploaded, now, mode, local_tz):>{DAYS_WIDTH}}"
         f"{' ' * VERSION_GAP}{release.version}"
     )
 
@@ -484,7 +503,9 @@ def column_header(mode: str = UTC_MODE, sort: str = SORT_BY_VERSION,
     )
 
 
-def stable_releases(versions: Sequence[Release], gap: int) -> list[Release]:
+def stable_releases(versions: Sequence[Release], gap: int,
+                    mode: str = UTC_MODE,
+                    local_tz: tzinfo | None = None) -> list[Release]:
     """The marked releases that stayed current for at least *gap* days.
 
     A release is stable when the next release in the history arrived more than
@@ -494,15 +515,21 @@ def stable_releases(versions: Sequence[Release], gap: int) -> list[Release]:
     order, whatever order the table is sorted in, and every release in the
     history counts: what was published next is a fact about the package, not
     about the marking.  Releases that are not marked are never returned.
+
+    The count is in calendar days, in the zone *mode* selects, the same unit
+    the ``DAYS`` column prints: a release followed the next morning has been
+    current for one day, not for a few hours.  Moving ``z`` can therefore move
+    a borderline release across the gap, exactly as it moves its ``DAYS``.
     """
     times = sorted({release.uploaded for release in versions})
-    limit = timedelta(days=gap)
     stable: list[Release] = []
     for release in versions:
         if not release.delete:
             continue
         index = bisect.bisect_right(times, release.uploaded)
-        if index == len(times) or times[index] - release.uploaded > limit:
+        if index == len(times):
+            stable.append(release)
+        elif days_since(release.uploaded, times[index], mode, local_tz) > gap:
             stable.append(release)
     return stable
 
@@ -681,7 +708,7 @@ class CleanupApp:
 
         self.opts = SimpleNamespace()
         # Seeding the options before they are registered is what makes the
-        # stored values the starting values: registration only normalises a
+        # stored values the starting values: registration only normalizes a
         # missing value.
         self.opts.theme = choice
         if zone in ZONES:
@@ -1335,7 +1362,7 @@ class MainScreen(CleanupScreen):
                 context=Context(genre='DECOR'),
             )
             return
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         mode = self._time_mode()
         # Once anything is marked, the surviving releases are the interesting
         # rows: paint them in SUCCESS.  A marked row keeps its DEL cell plain
@@ -1449,7 +1476,8 @@ class MainScreen(CleanupScreen):
         app = self.app
         gap = self._gap_days()
         marked = self._marked_count()
-        stable = stable_releases(app.cleanup.versions, gap)
+        stable = stable_releases(
+            app.cleanup.versions, gap, self._time_mode())
         for release in stable:
             release.delete = False
         app.win.flash(
