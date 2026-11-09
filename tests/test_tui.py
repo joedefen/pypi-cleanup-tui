@@ -19,6 +19,7 @@ from pypi_cleanup_tui.ini import IniManager
 from pypi_cleanup_tui.main import (
     APP_NAME,
     DEFAULTS,
+    HOST_PYPI,
     HOST_TEST,
     SORT_BY_DATE,
     SORT_BY_VERSION,
@@ -48,6 +49,14 @@ def _restore_appearance():
     yield
     appearance.set_colors_enabled(colors)
     Theme.set_active(theme)
+
+
+@pytest.fixture(autouse=True)
+def _no_scoped_credentials(monkeypatch):
+    """A developer's own 4PYPI/4TEST credentials must not reach these tests."""
+    for base in tui_mod.CREDENTIAL_ENV_VARS:
+        for suffix in tui_mod.CREDENTIAL_SUFFIXES.values():
+            monkeypatch.delenv(base + suffix, raising=False)
 
 
 def _cleanup():
@@ -1473,6 +1482,62 @@ def test_the_cleanup_command_falls_back_to_the_login_name(monkeypatch):
     assert command[command.index('-u') + 1] == 'login'
 
 
+def test_credential_env_maps_only_the_hosts_non_empty_variables():
+    environ = {
+        'PYPI_CLEANUP_PASSWORD4PYPI': 'pypi-password',
+        'PYPI_CLEANUP_TOTP_SECRET4PYPI': 'pypi-totp',
+        'PYPI_CLEANUP_PASSWORD4TEST': 'test-password',
+        'PYPI_CLEANUP_TOTP_SECRET4TEST': '',
+    }
+
+    assert tui_mod.credential_env(HOST_PYPI, environ) == {
+        'PYPI_CLEANUP_PASSWORD': 'PYPI_CLEANUP_PASSWORD4PYPI',
+        'PYPI_CLEANUP_TOTP_SECRET': 'PYPI_CLEANUP_TOTP_SECRET4PYPI',
+    }
+    assert tui_mod.credential_env(HOST_TEST, environ) == {
+        'PYPI_CLEANUP_PASSWORD': 'PYPI_CLEANUP_PASSWORD4TEST',
+    }
+
+
+def test_credential_env_maps_nothing_without_a_scoped_value():
+    assert tui_mod.credential_env(
+        HOST_TEST, {'PYPI_CLEANUP_PASSWORD': 'base'}) == {}
+    assert tui_mod.credential_env(
+        'nowhere', {'PYPI_CLEANUP_PASSWORD4TEST': 'x'}) == {}
+
+
+def test_cleanup_env_copies_the_scoped_value_over_the_base_name():
+    environ = {
+        'PATH': '/bin',
+        'PYPI_CLEANUP_PASSWORD': 'base-password',
+        'PYPI_CLEANUP_PASSWORD4TEST': 'test-password',
+    }
+
+    env = tui_mod.cleanup_env(HOST_TEST, environ)
+
+    assert env['PYPI_CLEANUP_PASSWORD'] == 'test-password'
+    assert env['PATH'] == '/bin'
+    # The scoped name is the user's, and it passes through untouched.
+    assert env['PYPI_CLEANUP_PASSWORD4TEST'] == 'test-password'
+
+
+def test_cleanup_env_inherits_when_nothing_is_scoped():
+    assert tui_mod.cleanup_env(
+        HOST_TEST, {'PYPI_CLEANUP_PASSWORD': 'base'}) is None
+
+
+def test_the_display_names_the_credentials_it_will_map():
+    text = tui_mod.format_command(
+        ['pypi-cleanup', '-y'],
+        env={'PYPI_CLEANUP_PASSWORD': 'PYPI_CLEANUP_PASSWORD4TEST'},
+    )
+
+    assert text.splitlines() == [
+        '+ PYPI_CLEANUP_PASSWORD=PYPI_CLEANUP_PASSWORD4TEST',
+        '   pypi-cleanup -y',
+    ]
+
+
 def test_the_display_quotes_every_value():
     assert tui_mod.format_command(
         ['pypi-cleanup', '-y', '-u', 'alice', '-p', 'demo']
@@ -1550,18 +1615,31 @@ def test_the_run_hands_subprocess_an_argument_list(monkeypatch):
     calls = []
     monkeypatch.setattr(
         tui_mod.subprocess, 'call',
-        lambda command: calls.append(command) or 0,
+        lambda command, env=None: calls.append((command, env)) or 0,
     )
 
     status = tui_mod.run_cleanup(['pypi-cleanup', '-r', '^(1\\.0)$'])
 
     assert status == 0
     # A list, not a command string: no shell can eat the pattern's backslashes.
-    assert calls == [['pypi-cleanup', '-r', '^(1\\.0)$']]
+    assert calls == [(['pypi-cleanup', '-r', '^(1\\.0)$'], None)]
+
+
+def test_the_run_hands_subprocess_the_cleanup_environment(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tui_mod.subprocess, 'call',
+        lambda command, env=None: calls.append((command, env)) or 0,
+    )
+    env = {'PYPI_CLEANUP_PASSWORD': 'test-password'}
+
+    assert tui_mod.run_cleanup(['pypi-cleanup'], env) == 0
+
+    assert calls == [(['pypi-cleanup'], env)]
 
 
 def test_a_missing_cleanup_tool_is_reported(monkeypatch, capsys):
-    def missing(command):
+    def missing(command, env=None):
         raise OSError('not found')
 
     monkeypatch.setattr(tui_mod.subprocess, 'call', missing)
@@ -1632,7 +1710,7 @@ def test_the_hand_off_runs_the_dry_run_then_the_deletion(monkeypatch, capsys):
         )
         monkeypatch.setattr(
             tui_mod, 'run_cleanup',
-            lambda command: runs.append(command) or 0,
+            lambda command, env=None: runs.append(command) or 0,
         )
 
         app.hand_off_to_cleanup(['2.0', '1.0'])
@@ -1658,6 +1736,35 @@ def test_the_hand_off_runs_the_dry_run_then_the_deletion(monkeypatch, capsys):
         app.win.stop_curses()
 
 
+def test_the_hand_off_maps_the_hosts_scoped_credentials(monkeypatch, capsys):
+    cleanup = _cleanup()
+    cleanup.host_key = HOST_TEST
+    app = _app(cleanup)
+    supplied = []
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no',
+            lambda question, default: question == tui_mod.DRY_RUN_PROMPT)
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup',
+            lambda command, env=None: supplied.append(env) or 0,
+        )
+        monkeypatch.setenv('PYPI_CLEANUP_PASSWORD4TEST', 'test-password')
+
+        app.hand_off_to_cleanup(['1.0'])
+
+        assert supplied[0]['PYPI_CLEANUP_PASSWORD'] == 'test-password'
+        # The printed description names the mapping, never the value.
+        out = capsys.readouterr().out
+        assert ('+ PYPI_CLEANUP_PASSWORD='
+                'PYPI_CLEANUP_PASSWORD4TEST') in out
+        assert 'test-password' not in out
+    finally:
+        app.win.stop_curses()
+
+
 def test_a_no_to_the_dry_run_skips_it(monkeypatch):
     app = _app()
     runs = []
@@ -1668,7 +1775,7 @@ def test_a_no_to_the_dry_run_skips_it(monkeypatch):
             tui_mod, 'ask_yes_no', lambda question, default: False)
         monkeypatch.setattr(
             tui_mod, 'run_cleanup',
-            lambda command: runs.append(command) or 0,
+            lambda command, env=None: runs.append(command) or 0,
         )
 
         app.hand_off_to_cleanup(['2.0'])
@@ -1690,7 +1797,7 @@ def test_a_no_to_the_deletion_leaves_the_index_alone(monkeypatch, capsys):
         )
         monkeypatch.setattr(
             tui_mod, 'run_cleanup',
-            lambda command: runs.append(command) or 0,
+            lambda command, env=None: runs.append(command) or 0,
         )
 
         app.hand_off_to_cleanup(['2.0'])
@@ -1721,7 +1828,7 @@ def test_a_failed_deletion_is_retried_until_it_succeeds(monkeypatch, capsys):
         monkeypatch.setattr(tui_mod, 'ask_yes_no', answer)
         monkeypatch.setattr(
             tui_mod, 'run_cleanup',
-            lambda command: runs.append(command) or next(statuses),
+            lambda command, env=None: runs.append(command) or next(statuses),
         )
 
         app.hand_off_to_cleanup(['2.0'])
@@ -1753,7 +1860,7 @@ def test_a_no_to_the_retry_leaves_the_history_alone(monkeypatch):
         monkeypatch.setattr(tui_mod, 'ask_yes_no', answer)
         monkeypatch.setattr(
             tui_mod, 'run_cleanup',
-            lambda command: runs.append(command) or 1,
+            lambda command, env=None: runs.append(command) or 1,
         )
 
         app.hand_off_to_cleanup(['2.0'])
@@ -1786,7 +1893,7 @@ def test_a_successful_deletion_reloads_and_clears_the_view(monkeypatch):
         monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
         monkeypatch.setattr(
             tui_mod, 'ask_yes_no', lambda question, default: True)
-        monkeypatch.setattr(tui_mod, 'run_cleanup', lambda command: 0)
+        monkeypatch.setattr(tui_mod, 'run_cleanup', lambda command, env=None: 0)
 
         app.hand_off_to_cleanup(['2.0'])
         # The run loop redraws the table straight after an action; doing the

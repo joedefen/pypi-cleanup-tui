@@ -114,13 +114,14 @@ The untitled first column carries `✓` once this run has loaded that package; `
 
 The table hands the marked releases to [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/), which performs the actual deletion, so a normal run checks for it first and stops with a hint to install it when it is missing. `--read-only` skips that check and disarms the delete key: the run browses the history and the hint line shows `R/O` where `del` would be.
 
-Pressing `d` leaves the table for the bare terminal, where it shows the `pypi-cleanup` command built from the marked versions, asks for a `--query-only` dry run, shows what that reports, and then asks again before the `--do-it` deletion. Each question takes `yes`, `no`, or a bare `ENTER` for the safe answer (yes to the dry run, no to the deletion); a no to the deletion leaves the index alone, and the final `ENTER` returns to the table. The command printed before each run is a description, not something to paste into a shell: the values are quoted for reading and a long version pattern is broken after its `|` alternations, so the text is not a copy-pasteable command line.
+Pressing `d` leaves the table for the bare terminal, where it shows the `pypi-cleanup` command built from the marked versions, asks for a `--query-only` dry run, shows what that reports, and then asks again before the `--do-it` deletion. Each question takes `yes`, `no`, or a bare `ENTER` for the safe answer (yes to the dry run, no to the deletion); a no to the deletion leaves the index alone, and the final `ENTER` returns to the table. The command printed before each run is a description, not something to paste into a shell: the values are quoted for reading and a long version pattern is broken after its `|` alternations, so the text is not a copy-pasteable command line. When a scoped credential supplies a value, one extra line above the command names the mapping, never the value.
 
 > **`pypi-cleanup` hints**
 >
 > * Read the tool's documentation at <https://pypi.org/project/pypi-cleanup/>.
 > * Set `$PYPI_CLEANUP_PASSWORD` to your account's login password to skip its password prompt.
 > * Set `$PYPI_CLEANUP_TOTP_SECRET` to skip the prompt for your 6-digit authenticator value on every run.
+> * Scope either value to one index with a `4PYPI` or `4TEST` suffix -- `$PYPI_CLEANUP_PASSWORD4TEST`, `$PYPI_CLEANUP_TOTP_SECRET4PYPI` -- and the TUI passes it as the base variable only when that index is in use. With neither suffix set, the base variables are left untouched.
 
 ### Options are remembered
 

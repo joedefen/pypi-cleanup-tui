@@ -201,6 +201,12 @@ DO_IT = '--do-it'
 COMMAND_WIDTH = 78
 COMMAND_INDENT = '   '
 
+#: The variables ``pypi-cleanup`` reads its credentials from.  A value can be
+#: scoped to one index by appending ``4PYPI`` or ``4TEST`` to the name, so the
+#: test index's password never reaches the real one.
+CREDENTIAL_ENV_VARS = ('PYPI_CLEANUP_PASSWORD', 'PYPI_CLEANUP_TOTP_SECRET')
+CREDENTIAL_SUFFIXES = {HOST_PYPI: '4PYPI', HOST_TEST: '4TEST'}
+
 #: The two questions asked between the runs.  The dry run defaults to yes
 #: because it only reports; the destructive run defaults to no.
 DRY_RUN_PROMPT = 'Dry-run [Yes OR no]?'
@@ -263,6 +269,45 @@ def cleanup_command(
     return command
 
 
+def credential_env(host: str,
+                   environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Map each credential variable to the host-scoped one that supplies it.
+
+    ``PYPI_CLEANUP_PASSWORD4PYPI`` and ``PYPI_CLEANUP_PASSWORD4TEST`` keep the
+    two indexes' passwords apart, and the ``...TOTP_SECRET4...`` pair does the
+    same for authenticator secrets.  Only a non-empty variable scoped to *host*
+    is mapped; with none set the mapping is empty and the base variables are
+    inherited unchanged.  The mapping holds variable names, never values, so it
+    is safe to print above the command.
+    """
+    env = os.environ if environ is None else environ
+    suffix = CREDENTIAL_SUFFIXES.get(host)
+    if suffix is None:
+        return {}
+    return {
+        base: base + suffix
+        for base in CREDENTIAL_ENV_VARS
+        if env.get(base + suffix)
+    }
+
+
+def cleanup_env(host: str,
+                environ: Mapping[str, str] | None = None) -> dict[str, str] | None:
+    """The environment for a ``pypi-cleanup`` run, or ``None`` to inherit.
+
+    Each scoped variable's value is copied into the base name the tool reads,
+    so the child sees ``PYPI_CLEANUP_PASSWORD`` whichever index the value was
+    stored for; the rest of the environment passes through untouched.  When
+    nothing is mapped, inheriting the parent's environment says the same thing,
+    which is why the answer is ``None`` rather than a copy.
+    """
+    env = os.environ if environ is None else environ
+    mapped = credential_env(host, env)
+    if not mapped:
+        return None
+    return {**env, **{base: env[scoped] for base, scoped in mapped.items()}}
+
+
 def _quoted(value: str) -> str:
     """Show *value* in single quotes, always, the way the display wants it."""
     return "'" + value.replace("'", "'\\''") + "'"
@@ -306,7 +351,8 @@ def _wrap_pattern(pattern: str, width: int) -> list[str]:
     return pieces
 
 
-def format_command(command: Sequence[str], width: int = COMMAND_WIDTH) -> str:
+def format_command(command: Sequence[str], width: int = COMMAND_WIDTH,
+                   env: Mapping[str, str] | None = None) -> str:
     """Lay *command* out the way the hand-off prints it.
 
     The values are always quoted, a value too long for one line is broken
@@ -315,9 +361,19 @@ def format_command(command: Sequence[str], width: int = COMMAND_WIDTH) -> str:
     shell: it omits the phase switch, and a split line would not survive a
     copy.  ``pypi-cleanup`` is handed the argument list itself, so the printed
     text is never what runs.
+
+    *env* is the :func:`credential_env` mapping; each pair is printed above the
+    command as ``BASE=SCOPED``, naming where the value comes from without
+    printing the value.
     """
     lines: list[str] = []
-    line = '+ ' + command[0]
+    env_lines = [f'{base}={scoped}' for base, scoped in (env or {}).items()]
+    if env_lines:
+        lines.append('+ ' + env_lines[0])
+        lines.extend(COMMAND_INDENT + text for text in env_lines[1:])
+        line = COMMAND_INDENT + command[0]
+    else:
+        line = '+ ' + command[0]
 
     def add_word(word: str) -> None:
         nonlocal line
@@ -381,17 +437,19 @@ def ask_yes_no(question: str, default: bool) -> bool:
             return False
 
 
-def run_cleanup(command: Sequence[str]) -> int:
+def run_cleanup(command: Sequence[str],
+                env: Mapping[str, str] | None = None) -> int:
     """Run *command* on the bare terminal and return its exit status.
 
     The argument list goes to :func:`subprocess.call` without a shell, so the
     pattern :func:`cleanup_command` built reaches ``pypi-cleanup`` exactly as
     written -- the backslashes ``re.escape`` added are not eaten by a shell.  A
     missing executable is reported rather than raised, so the table can still
-    come back.
+    come back.  *env* is :func:`cleanup_env`'s answer; ``None`` inherits the
+    parent's environment.
     """
     try:
-        return subprocess.call(list(command))
+        return subprocess.call(list(command), env=env)
     except OSError as error:
         print(f'error: could not run {CLEANUP_TOOL}: {error}')
         return 1
@@ -970,26 +1028,32 @@ class CleanupApp:
         still needs its own yes.  A deletion that succeeds makes the table
         re-query the package, so the view the user returns to is the history
         that is actually left, not the one the marks were made against.
+        Credentials scoped with ``4PYPI`` or ``4TEST`` are copied into the base
+        variables the tool reads and named above the printed command, so one
+        index's password is never offered to the other.
         """
         base = cleanup_command(self.cleanup, versions)
         package = self.cleanup.package
         count = len(versions)
+        mapped = credential_env(self.cleanup.host_key)
+        env = cleanup_env(self.cleanup.host_key)
         deleted = 0
         self.win.suspend_curses()
         try:
             _reset_terminal()
-            print(format_command(base))
+            print(format_command(base, env=mapped))
             print()
             if ask_yes_no(DRY_RUN_PROMPT, default=True):
                 query = cleanup_command(self.cleanup, versions, QUERY_ONLY)
-                print(format_command(query))
-                print(summary_line('Dry run', package, run_cleanup(query)))
+                print(format_command(query, env=mapped))
+                print(summary_line('Dry run', package, run_cleanup(query, env)))
                 print()
             if ask_yes_no(
                 DELETE_PROMPT.format(count=count, package=package),
                 default=False,
             ):
-                if self._delete_with_retry(versions, package, count):
+                if self._delete_with_retry(versions, package, count,
+                                           mapped, env):
                     deleted = count
             press_enter()
         finally:
@@ -1003,6 +1067,8 @@ class CleanupApp:
         versions: Sequence[str],
         package: str,
         count: int,
+        mapped: Mapping[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> bool:
         """Run the ``--do-it`` deletion, reissuing it until it succeeds.
 
@@ -1010,12 +1076,14 @@ class CleanupApp:
         fails is offered again behind a ``RETRY:`` prompt, because the marked
         versions have not changed while the terminal was idle and the same
         command can be repeated; the loop ends when a run succeeds or the user
-        declines.  Returns whether the marked versions were deleted.
+        declines.  Returns whether the marked versions were deleted.  *mapped*
+        and *env* are the credential mapping and the child environment, so the
+        retry names and hands over exactly what the first run did.
         """
         while True:
             destroy = cleanup_command(self.cleanup, versions, DO_IT)
-            print(format_command(destroy))
-            status = run_cleanup(destroy)
+            print(format_command(destroy, env=mapped))
+            status = run_cleanup(destroy, env)
             print(summary_line('Deletion', package, status))
             print()
             if status == 0:
