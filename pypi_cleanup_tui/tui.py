@@ -123,6 +123,7 @@ from console_window import (
 )
 from console_window import help as help_text
 
+from pypi_cleanup_tui import totp
 from pypi_cleanup_tui.main import (
     CLEANUP_TOOL,
     DEFAULT_GAP,
@@ -203,8 +204,11 @@ COMMAND_INDENT = '   '
 
 #: The variables ``pypi-cleanup`` reads its credentials from.  A value can be
 #: scoped to one index by appending ``4PYPI`` or ``4TEST`` to the name, so the
-#: test index's password never reaches the real one.
-CREDENTIAL_ENV_VARS = ('PYPI_CLEANUP_PASSWORD', 'PYPI_CLEANUP_TOTP_SECRET')
+#: test index's password never reaches the real one.  The TOTP secret is
+#: deliberately absent: the tool has no variable for it and always prompts for
+#: the six-digit code, which the TUI computes itself (see
+#: :mod:`pypi_cleanup_tui.totp`).
+CREDENTIAL_ENV_VARS = ('PYPI_CLEANUP_PASSWORD',)
 CREDENTIAL_SUFFIXES = {HOST_PYPI: '4PYPI', HOST_TEST: '4TEST'}
 
 #: The variable that names the account for one index.  Its scoped form wins
@@ -301,11 +305,11 @@ def credential_env(host: str,
     """Map each credential variable to the host-scoped one that supplies it.
 
     ``PYPI_CLEANUP_PASSWORD4PYPI`` and ``PYPI_CLEANUP_PASSWORD4TEST`` keep the
-    two indexes' passwords apart, and the ``...TOTP_SECRET4...`` pair does the
-    same for authenticator secrets.  Only a non-empty variable scoped to *host*
+    two indexes' passwords apart.  Only a non-empty variable scoped to *host*
     is mapped; with none set the mapping is empty and the base variables are
     inherited unchanged.  The mapping holds variable names, never values, so it
-    is safe to print above the command.
+    is safe to print above the command.  The TOTP secret is not here: the tool
+    does not read one, so the TUI computes the code instead.
     """
     env = os.environ if environ is None else environ
     suffix = CREDENTIAL_SUFFIXES.get(host)
@@ -333,6 +337,44 @@ def cleanup_env(host: str,
     if not mapped:
         return None
     return {**env, **{base: env[scoped] for base, scoped in mapped.items()}}
+
+
+def totp_secret(host: str,
+                environ: Mapping[str, str] | None = None) -> str:
+    """The authenticator secret that applies to *host*, or ``''``.
+
+    ``PYPI_CLEANUP_TOTP_SECRET4PYPI`` and ``...4TEST`` keep the two indexes'
+    secrets apart and win over the unscoped variable, which is the fallback for
+    a user with only one account.  This secret is read by the TUI itself:
+    ``pypi-cleanup`` has no variable for it and always prompts for the code.
+    """
+    env = os.environ if environ is None else environ
+    suffix = CREDENTIAL_SUFFIXES.get(host)
+    scoped = env.get(totp.TOTP_SECRET_ENV_VAR + suffix, '') if suffix else ''
+    return scoped or env.get(totp.TOTP_SECRET_ENV_VAR, '')
+
+
+def show_authentication_code(host: str,
+                             environ: Mapping[str, str] | None = None) -> None:
+    """Print the code ``pypi-cleanup`` will prompt for, and its lifetime.
+
+    The tool has no variable for the TOTP secret -- it always asks for the
+    six-digit value -- so the secret the TUI holds is turned into the current
+    code here, just before the child starts.  A code with only a few seconds
+    left is not printed: the wait takes the next one, so the user has room to
+    type it at the prompt.  With no secret set nothing is printed and the tool
+    prompts as usual.  A malformed secret is reported rather than raised, so
+    the deletion can still reach its own prompt.
+    """
+    secret = totp_secret(host, environ)
+    if not secret:
+        return
+    try:
+        code, remaining = totp.code_with_room(secret)
+    except ValueError as error:
+        print(f'warning: {error}')
+    else:
+        print(totp.format_code(code, remaining))
 
 
 def _quoted(value: str) -> str:
@@ -1057,7 +1099,10 @@ class CleanupApp:
         that is actually left, not the one the marks were made against.
         Credentials scoped with ``4PYPI`` or ``4TEST`` are copied into the base
         variables the tool reads and named above the printed command, so one
-        index's password is never offered to the other.
+        index's password is never offered to the other.  ``pypi-cleanup`` has
+        no variable for the authenticator secret, so the current code is
+        printed above each run for its ``Authentication code:`` prompt; see
+        :func:`show_authentication_code`.
         """
         base = cleanup_command(self.cleanup, versions)
         package = self.cleanup.package
@@ -1073,6 +1118,7 @@ class CleanupApp:
             if ask_yes_no(DRY_RUN_PROMPT, default=True):
                 query = cleanup_command(self.cleanup, versions, QUERY_ONLY)
                 print(format_command(query, env=mapped))
+                show_authentication_code(self.cleanup.host_key)
                 print(summary_line('Dry run', package, run_cleanup(query, env)))
                 print()
             if ask_yes_no(
@@ -1105,11 +1151,14 @@ class CleanupApp:
         command can be repeated; the loop ends when a run succeeds or the user
         declines.  Returns whether the marked versions were deleted.  *mapped*
         and *env* are the credential mapping and the child environment, so the
-        retry names and hands over exactly what the first run did.
+        retry names and hands over exactly what the first run did; a fresh
+        authenticator code is printed before each attempt, because a code can
+        expire while the user reads the previous failure.
         """
         while True:
             destroy = cleanup_command(self.cleanup, versions, DO_IT)
             print(format_command(destroy, env=mapped))
+            show_authentication_code(self.cleanup.host_key)
             status = run_cleanup(destroy, env)
             print(summary_line('Deletion', package, status))
             print()

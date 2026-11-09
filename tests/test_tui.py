@@ -57,6 +57,12 @@ def _no_scoped_credentials(monkeypatch):
     for base in (*tui_mod.CREDENTIAL_ENV_VARS, tui_mod.USER_ENV_VAR):
         for suffix in tui_mod.CREDENTIAL_SUFFIXES.values():
             monkeypatch.delenv(base + suffix, raising=False)
+    # The TUI reads the TOTP secret itself, scoped or not, so a developer's
+    # own value must not leak into a hand-off test that prints the code.
+    for suffix in tui_mod.CREDENTIAL_SUFFIXES.values():
+        monkeypatch.delenv(tui_mod.totp.TOTP_SECRET_ENV_VAR + suffix,
+                           raising=False)
+    monkeypatch.delenv(tui_mod.totp.TOTP_SECRET_ENV_VAR, raising=False)
 
 
 def _cleanup():
@@ -1538,7 +1544,7 @@ def test_an_empty_scoped_user_leaves_the_flag_in_charge(monkeypatch):
     assert command[command.index('-u') + 1] == 'flag'
 
 
-def test_credential_env_maps_only_the_hosts_non_empty_variables():
+def test_credential_env_maps_only_the_hosts_non_empty_password():
     environ = {
         'PYPI_CLEANUP_PASSWORD4PYPI': 'pypi-password',
         'PYPI_CLEANUP_TOTP_SECRET4PYPI': 'pypi-totp',
@@ -1548,11 +1554,13 @@ def test_credential_env_maps_only_the_hosts_non_empty_variables():
 
     assert tui_mod.credential_env(HOST_PYPI, environ) == {
         'PYPI_CLEANUP_PASSWORD': 'PYPI_CLEANUP_PASSWORD4PYPI',
-        'PYPI_CLEANUP_TOTP_SECRET': 'PYPI_CLEANUP_TOTP_SECRET4PYPI',
     }
     assert tui_mod.credential_env(HOST_TEST, environ) == {
         'PYPI_CLEANUP_PASSWORD': 'PYPI_CLEANUP_PASSWORD4TEST',
     }
+    # The TOTP secret is read by the TUI, never copied into the child's env.
+    assert 'PYPI_CLEANUP_TOTP_SECRET' not in tui_mod.cleanup_env(
+        HOST_PYPI, environ)
 
 
 def test_credential_env_maps_nothing_without_a_scoped_value():
@@ -1580,6 +1588,46 @@ def test_cleanup_env_copies_the_scoped_value_over_the_base_name():
 def test_cleanup_env_inherits_when_nothing_is_scoped():
     assert tui_mod.cleanup_env(
         HOST_TEST, {'PYPI_CLEANUP_PASSWORD': 'base'}) is None
+
+
+def test_totp_secret_prefers_the_hosts_scoped_value():
+    environ = {
+        'PYPI_CLEANUP_TOTP_SECRET': 'base-secret',
+        'PYPI_CLEANUP_TOTP_SECRET4PYPI': 'pypi-secret',
+        'PYPI_CLEANUP_TOTP_SECRET4TEST': '',
+    }
+
+    assert tui_mod.totp_secret(HOST_PYPI, environ) == 'pypi-secret'
+    # An empty scoped value leaves the unscoped secret as the fallback, and an
+    # unknown host has no scoped form at all.
+    assert tui_mod.totp_secret(HOST_TEST, environ) == 'base-secret'
+    assert tui_mod.totp_secret('nowhere', environ) == 'base-secret'
+
+
+def test_no_totp_secret_prints_nothing(capsys):
+    tui_mod.show_authentication_code(HOST_PYPI, {})
+
+    assert capsys.readouterr().out == ''
+
+
+def test_the_authentication_code_is_printed_for_the_prompt(monkeypatch, capsys):
+    monkeypatch.setattr(
+        tui_mod.totp, 'code_with_room', lambda secret: ('123456', 24))
+
+    tui_mod.show_authentication_code(
+        HOST_PYPI, {'PYPI_CLEANUP_TOTP_SECRET':
+                    'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'})
+
+    assert capsys.readouterr().out == (
+        'Authentication code: 123456 (expires in 24s)\n')
+
+
+def test_a_bad_totp_secret_is_reported_not_raised(capsys):
+    tui_mod.show_authentication_code(
+        HOST_PYPI, {'PYPI_CLEANUP_TOTP_SECRET': 'not base 32!'})
+
+    out = capsys.readouterr().out
+    assert 'warning: could not compute a TOTP code' in out
 
 
 def test_the_display_names_the_credentials_it_will_map():
@@ -1817,6 +1865,37 @@ def test_the_hand_off_maps_the_hosts_scoped_credentials(monkeypatch, capsys):
         assert ('+ PYPI_CLEANUP_PASSWORD='
                 'PYPI_CLEANUP_PASSWORD4TEST') in out
         assert 'test-password' not in out
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_hand_off_prints_the_code_before_the_run(monkeypatch, capsys):
+    app = _app()
+    answers = iter([True, False])   # yes to the dry run, no to the deletion
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no',
+            lambda question, default: next(answers),
+        )
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup', lambda command, env=None: 0)
+        monkeypatch.setattr(
+            tui_mod.totp, 'code_with_room', lambda secret: ('123456', 30))
+        monkeypatch.setenv(
+            'PYPI_CLEANUP_TOTP_SECRET', 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ')
+
+        app.hand_off_to_cleanup(['2.0'])
+
+        out = capsys.readouterr().out
+        assert out.count('Authentication code: ') == 1
+        assert 'Authentication code: 123456 (expires in 30s)' in out
+        # The code sits between the printed command and its report, so it is
+        # the value the prompt after that command will ask for.
+        assert (out.index('--query-only')
+                < out.index('Authentication code:')
+                < out.index('Dry run finished'))
     finally:
         app.win.stop_curses()
 

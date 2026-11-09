@@ -70,6 +70,9 @@ dependencies = [
     # least as new as the metadata writer.  Declaring the same floor here means
     # the installed package always satisfies the gate.
     "packaging>=26",
+    # The TUI computes the six-digit authenticator code that pypi-cleanup
+    # prompts for; the tool itself has no variable for the TOTP secret.
+    "pyotp>=2.9",
     "requests>=2.28",
 ]
 
