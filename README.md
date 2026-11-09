@@ -121,7 +121,8 @@ Pressing `d` leaves the table for the bare terminal, where it shows the `pypi-cl
 > * Read the tool's documentation at <https://pypi.org/project/pypi-cleanup/>.
 > * Set `$PYPI_CLEANUP_PASSWORD` to your account's login password to skip its password prompt.
 > * Set `$PYPI_CLEANUP_TOTP_SECRET` to skip the prompt for your 6-digit authenticator value on every run.
-> * Scope either value to one index with a `4PYPI` or `4TEST` suffix -- `$PYPI_CLEANUP_PASSWORD4TEST`, `$PYPI_CLEANUP_TOTP_SECRET4PYPI` -- and the TUI passes it as the base variable only when that index is in use. With neither suffix set, the base variables are left untouched.
+> * Scope either value to one index with a `4PYPI` or `4TEST` suffix -- `$PYPI_CLEANUP_PASSWORD4TEST`, `$PYPI_CLEANUP_TOTP_SECRET4PYPI` -- and the TUI passes it as the base variable only when that index is in use. Each base variable is left untouched when its suffix form is unset,
+> * **The machine running this TUI must be "trusted".** If `pypi-cleanup` fails with an authentication or unrecognized device error, log into pypi.org and test.pypi.org using a browser on this same machine, and click the resulting verification link in the email from that same browser.
 
 ### Options are remembered
 
