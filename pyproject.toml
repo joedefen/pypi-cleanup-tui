@@ -70,6 +70,9 @@ dependencies = [
     # least as new as the metadata writer.  Declaring the same floor here means
     # the installed package always satisfies the gate.
     "packaging>=26",
+    # `--totp-method=expect` drives the pypi-cleanup prompt through a pty and
+    # sends the code when the user presses Ctrl+].
+    "pexpect>=4.9",
     # The TUI computes the six-digit authenticator code that pypi-cleanup
     # prompts for; the tool itself has no variable for the TOTP secret.
     "pyotp>=2.9",

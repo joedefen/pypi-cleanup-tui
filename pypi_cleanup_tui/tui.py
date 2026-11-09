@@ -127,6 +127,7 @@ from pypi_cleanup_tui import totp
 from pypi_cleanup_tui.main import (
     CLEANUP_TOOL,
     DEFAULT_GAP,
+    DEFAULT_TOTP_METHOD,
     GAP_CHOICES,
     HOST_PYPI,
     HOST_TEST,
@@ -134,6 +135,10 @@ from pypi_cleanup_tui.main import (
     MONO_THEME,
     SORT_BY_DATE,
     SORT_BY_VERSION,
+    TOTP_AUTO,
+    TOTP_EXPECT,
+    TOTP_METHODS,
+    TOTP_PRINT,
     UTC_MODE,
     ZONES,
 )
@@ -210,6 +215,32 @@ COMMAND_INDENT = '   '
 #: :mod:`pypi_cleanup_tui.totp`).
 CREDENTIAL_ENV_VARS = ('PYPI_CLEANUP_PASSWORD',)
 CREDENTIAL_SUFFIXES = {HOST_PYPI: '4PYPI', HOST_TEST: '4TEST'}
+
+#: Seconds pexpect waits for ``pypi-cleanup`` before giving up.  A deletion of
+#: many releases can take minutes, so this is the hand-off's patience, not the
+#: patience for one prompt.
+EXPECT_TIMEOUT = 300
+
+#: Ctrl+] (ASCII 29).  This is pexpect's default escape, stated explicitly so
+#: a change in its default cannot silently take the choice away from the user.
+EXPECT_ESCAPE = '\x1d'
+
+#: The pattern pexpect waits for in ``auto`` mode.  It is deliberately
+#: generous: a change from "Authentication code:" to "authentication code "
+#: must still match, and the case is not part of the contract.
+TOTP_PROMPT_PATTERN = r'(?i)authentication code[: ]'
+
+#: The block-quote instructions shown before an ``expect`` run.  The banner is
+#: printed before pexpect starts, so the user knows the escape is available
+#: while the password and device prompts are answered normally.  The bare
+#: ``|`` lines above and below set the quote apart from the command text.
+EXPECT_BANNER = (
+    '|\n'
+    '| About to run pypi-cleanup...\n'
+    '| When prompted for "Authentication code:", press Ctrl+] to have this '
+    'TUI supply the code automatically.\n'
+    '|'
+)
 
 #: The variable that names the account for one index.  Its scoped form wins
 #: over ``-u``, because a flag cannot be scoped to the index in use.
@@ -524,6 +555,108 @@ def run_cleanup(command: Sequence[str],
         return 1
 
 
+class ExpectUnavailable(RuntimeError):
+    """pexpect could not be imported or could not start the child.
+
+    It is raised only before the child has run, so the caller can safely fall
+    back to printing the code and starting ``pypi-cleanup`` normally.  A
+    failure after the child has started is reported as an exit status instead;
+    re-running the deletion there could repeat it.
+    """
+
+
+def _start_pexpect(command, secret, env, pexpect_module):
+    """Resolve pexpect, validate the secret, and spawn the child.
+
+    Everything here happens before the child runs, so any failure is an
+    :class:`ExpectUnavailable` the caller can safely answer by falling back to
+    the plain subprocess.
+    """
+    module = pexpect_module
+    if module is None:
+        try:
+            import pexpect as module
+        except ImportError as error:
+            raise ExpectUnavailable(error) from error
+    try:
+        totp.code_and_remaining(secret)
+    except ValueError as error:
+        raise ExpectUnavailable(error) from error
+    try:
+        child = module.spawn(
+            command[0],
+            list(command[1:]),
+            encoding='utf-8',
+            timeout=EXPECT_TIMEOUT,
+            env=env,
+        )
+    except (OSError, module.ExceptionPexpect) as error:
+        raise ExpectUnavailable(error) from error
+    return module, child
+
+
+def _run_pexpect(command, secret, env, pexpect_module, interactive):
+    """Shared body of the ``expect`` and ``auto`` methods.
+
+    *interactive* gives the terminal to the child until Ctrl+]; otherwise the
+    child's output up to the generous prompt pattern is echoed before the code
+    is sent.  A failure after the child has started is reported as an exit
+    status, never by starting the command again.
+    """
+    module, child = _start_pexpect(command, secret, env, pexpect_module)
+    try:
+        if interactive:
+            child.interact(escape_character=EXPECT_ESCAPE)
+        else:
+            child.expect(TOTP_PROMPT_PATTERN)
+            if child.before:
+                print(child.before, end='')
+            if child.after:
+                print(child.after, end='')
+        code, _remaining = totp.code_with_room(secret)
+        child.sendline(code)
+        child.expect(module.EOF)
+        if child.before:
+            print(child.before, end='')
+    except module.TIMEOUT:
+        print(f'warning: {CLEANUP_TOOL} did not finish within '
+              f'{EXPECT_TIMEOUT}s')
+    except (module.EOF, OSError) as error:
+        print(f'warning: pexpect could not supply the code: {error}')
+    finally:
+        child.close()
+    return child.exitstatus if child.exitstatus is not None else 1
+
+
+def run_cleanup_expect(command: Sequence[str], secret: str,
+                       env: Mapping[str, str] | None = None,
+                       pexpect_module=None) -> int:
+    """Run under pexpect, handing the terminal back at Ctrl+].
+
+    The child owns the terminal until the user presses Ctrl+], so the password
+    and device prompts are answered normally.  At the ``Authentication code:``
+    prompt the escape returns control here: a code with room left is generated
+    and sent, then the child is allowed to finish.  Everything the child prints
+    after the escape is echoed once it exits.
+    """
+    return _run_pexpect(
+        command, secret, env, pexpect_module, interactive=True)
+
+
+def run_cleanup_auto(command: Sequence[str], secret: str,
+                     env: Mapping[str, str] | None = None,
+                     pexpect_module=None) -> int:
+    """Run under pexpect without ever giving the terminal to the user.
+
+    This is for the run whose password is already supplied: the child's output
+    is echoed, pexpect waits for the generous authentication-code prompt, and
+    the code is sent.  If another prompt appears first, the wait times out
+    rather than guessing at input; ``expect`` is the mode for that case.
+    """
+    return _run_pexpect(
+        command, secret, env, pexpect_module, interactive=False)
+
+
 def summary_line(action: str, package: str, status: int) -> str:
     """The one line printed under a finished ``pypi-cleanup`` run."""
     if status == 0:
@@ -765,6 +898,7 @@ class CleanupApp:
         gap: int = DEFAULT_GAP,
         read_only: bool = False,
         packages: Sequence[str] | None = None,
+        totp_method: str = DEFAULT_TOTP_METHOD,
     ) -> None:
         self.cleanup = cleanup
         #: Optional persistent options.  Without one the TUI runs exactly as
@@ -775,6 +909,12 @@ class CleanupApp:
         #: It is a switch for this run only, never a stored option -- a sticky
         #: read-only flag would quietly disarm the program.
         self.read_only = bool(read_only)
+        #: How the authenticator prompt is answered.  The command line
+        #: normalizes the stored choice; this guard keeps a direct caller from
+        #: injecting one the hand-off cannot honor.
+        self.totp_method = (
+            totp_method if totp_method in TOTP_METHODS else DEFAULT_TOTP_METHOD
+        )
         self.running = True
         #: The package list the command line supplied, shown one at a time.
         #: ``p`` rotates through it and ``P`` edits it; the model's package is
@@ -1099,10 +1239,11 @@ class CleanupApp:
         that is actually left, not the one the marks were made against.
         Credentials scoped with ``4PYPI`` or ``4TEST`` are copied into the base
         variables the tool reads and named above the printed command, so one
-        index's password is never offered to the other.  ``pypi-cleanup`` has
-        no variable for the authenticator secret, so the current code is
-        printed above each run for its ``Authentication code:`` prompt; see
-        :func:`show_authentication_code`.
+        index's password is never offered to the other.  How the authenticator
+        prompt is answered follows ``--totp-method``: ``expect`` drives the
+        child through pexpect and sends a code at Ctrl+], ``print`` only prints
+        the code above the run, and ``off`` leaves the prompt to the user; see
+        :meth:`_run_cleanup`.
         """
         base = cleanup_command(self.cleanup, versions)
         package = self.cleanup.package
@@ -1118,8 +1259,8 @@ class CleanupApp:
             if ask_yes_no(DRY_RUN_PROMPT, default=True):
                 query = cleanup_command(self.cleanup, versions, QUERY_ONLY)
                 print(format_command(query, env=mapped))
-                show_authentication_code(self.cleanup.host_key)
-                print(summary_line('Dry run', package, run_cleanup(query, env)))
+                print(summary_line(
+                    'Dry run', package, self._run_cleanup(query, env)))
                 print()
             if ask_yes_no(
                 DELETE_PROMPT.format(count=count, package=package),
@@ -1151,15 +1292,13 @@ class CleanupApp:
         command can be repeated; the loop ends when a run succeeds or the user
         declines.  Returns whether the marked versions were deleted.  *mapped*
         and *env* are the credential mapping and the child environment, so the
-        retry names and hands over exactly what the first run did; a fresh
-        authenticator code is printed before each attempt, because a code can
-        expire while the user reads the previous failure.
+        retry names and hands over exactly what the first run did; the
+        authenticator method is applied again for each attempt.
         """
         while True:
             destroy = cleanup_command(self.cleanup, versions, DO_IT)
             print(format_command(destroy, env=mapped))
-            show_authentication_code(self.cleanup.host_key)
-            status = run_cleanup(destroy, env)
+            status = self._run_cleanup(destroy, env)
             print(summary_line('Deletion', package, status))
             print()
             if status == 0:
@@ -1169,6 +1308,42 @@ class CleanupApp:
                 default=False,
             ):
                 return False
+
+    def _run_cleanup(self, command: Sequence[str],
+                     env: Mapping[str, str] | None = None) -> int:
+        """Run ``pypi-cleanup`` using the configured authenticator method.
+
+        ``print`` prints a code with room left and then uses subprocess.
+        ``expect`` gives the child to pexpect: the user answers the password
+        and device prompts, presses Ctrl+] at the authentication prompt, and
+        the TUI sends the code.  ``auto`` also uses pexpect but never hands the
+        terminal back; it is for a run whose password is supplied, so the only
+        prompt is the code.  With no secret there is nothing to send, so the
+        tool prompts as usual.  If pexpect cannot start the child at all, the
+        run falls back to ``print`` -- never after the child has started,
+        because re-running there could repeat a deletion.  ``off`` always uses
+        the plain run and leaves the prompt to the user.
+        """
+        if self.totp_method == TOTP_PRINT:
+            show_authentication_code(self.cleanup.host_key)
+            return run_cleanup(command, env)
+        if self.totp_method in (TOTP_EXPECT, TOTP_AUTO):
+            secret = totp_secret(self.cleanup.host_key)
+            if not secret:
+                return run_cleanup(command, env)
+            if self.totp_method == TOTP_EXPECT:
+                print(EXPECT_BANNER)
+                runner = run_cleanup_expect
+            else:
+                runner = run_cleanup_auto
+            try:
+                return runner(command, secret, env)
+            except ExpectUnavailable as error:
+                print(f'warning: pexpect could not start: {error}; '
+                      'printing the code instead.')
+                show_authentication_code(self.cleanup.host_key)
+                return run_cleanup(command, env)
+        return run_cleanup(command, env)
 
     def reload_after_deletion(self, deleted: int) -> None:
         """Fetch the package again after a successful deletion.
@@ -1708,6 +1883,14 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
             'as if the package had just been opened. The printed command '
             'describes the run and is not meant to be copied. A read-only run '
             '(--read-only) never offers d: the hint line reads R/O in its place.',
+            'The authenticator prompt follows --totp-method. expect, the '
+            'default, runs pypi-cleanup through pexpect: answer the password '
+            'and device prompts normally, then press Ctrl+] at the '
+            'Authentication code prompt and the TUI sends the code. auto also '
+            'uses pexpect but never hands control back; use it when the '
+            'password is supplied and the only prompt is for the code. print '
+            'only prints the code above each run; off leaves the prompt '
+            'entirely to you. The choice is remembered.',
             'g is the stability filter. On this screen it rotates the gap -- '
             '3, 7, 14, 30 or 60 days; a run starts at 30 and remembers the '
             'choice -- and on the main screen it unmarks every marked release '
@@ -1877,6 +2060,7 @@ def run_tui(
     gap: int = DEFAULT_GAP,
     read_only: bool = False,
     packages: Sequence[str] | None = None,
+    totp_method: str = DEFAULT_TOTP_METHOD,
 ) -> int:
     """Present *cleanup* in the terminal and return the process exit status."""
     return CleanupApp(
@@ -1891,4 +2075,5 @@ def run_tui(
         gap=gap,
         read_only=read_only,
         packages=packages,
+        totp_method=totp_method,
     ).run()

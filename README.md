@@ -51,6 +51,7 @@ pypi-cleanup-tui --host test pack1   # query test.pypi.org instead of pypi.org
 pypi-cleanup-tui -u alice pack1      # the PyPI user, kept for the cleanup step
 pypi-cleanup-tui --theme nord pack1  # install a palette (see the THEMES screen)
 pypi-cleanup-tui --no-color pack1    # attributes instead of color; remembered
+pypi-cleanup-tui --totp-method print pack1   # print the 6-digit code; remembered
 pypi-cleanup-tui --read-only pack1   # browse only: no delete key, no checks
 ```
 
@@ -114,19 +115,28 @@ The untitled first column carries `✓` once this run has loaded that package; `
 
 The table hands the marked releases to [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/), which performs the actual deletion, so a normal run checks for it first and stops with a hint to install it when it is missing. `--read-only` skips that check and disarms the delete key: the run browses the history and the hint line shows `R/O` where `del` would be.
 
-Pressing `d` leaves the table for the bare terminal, where it shows the `pypi-cleanup` command built from the marked versions, asks for a `--query-only` dry run, shows what that reports, and then asks again before the `--do-it` deletion. Each question takes `yes`, `no`, or a bare `ENTER` for the safe answer (yes to the dry run, no to the deletion); a no to the deletion leaves the index alone, and the final `ENTER` returns to the table. The command printed before each run is a description, not something to paste into a shell: the values are quoted for reading and a long version pattern is broken after its `|` alternations, so the text is not a copy-pasteable command line. When a scoped password supplies a value, one extra line above the command names the mapping, never the value; when a TOTP secret is configured, the computed code and its remaining seconds are printed just above the run (with 10 seconds or fewer left, the TUI waits for the next code first).
+Pressing `d` leaves the table for the bare terminal, shows the `pypi-cleanup` command built from the marked versions, runs a `--query-only` dry run, and then asks again before the `--do-it` deletion.
 
-> **`pypi-cleanup` hints**
+- Each question takes `yes`, `no`, or a bare `ENTER` for the safe answer (yes to the dry run, no to the deletion); a no to the deletion leaves the index alone, and the final `ENTER` returns to the table.
+- The printed command is a description, not something to paste into a shell: the values are quoted for reading and a long version pattern is broken after its `|` alternations.
+- When a scoped password supplies a value, one extra line above the command names the mapping, never the value.
+- The authenticator prompt is handled by the `--totp-method` in force, once a secret is set in `$PYPI_CLEANUP_TOTP_SECRET` or its scoped form; with none, every method leaves the prompt to you.
+  - **`expect`** (default) prints a short `|` banner, runs `pypi-cleanup` under `pexpect`, and sends a fresh code when you press `Ctrl+]` at the `Authentication code:` prompt. If `pexpect` cannot start the run, the code is printed instead.
+  - **`auto`** also uses `pexpect` but never hands the terminal back: use it when you supply the password too, so the only prompt is for the code.
+  - **`print`** shows the current code and its remaining lifetime above each run, sleeping out a code with 10 seconds or less left; you type it at the prompt.
+  - **`off`** leaves the prompt entirely to you and your own authenticator app.
+
+> **Hints for credentials (to reduce interactive prompts)**
 >
-> * Read the tool's documentation at <https://pypi.org/project/pypi-cleanup/>.
+> * Set `$PYPI_CLEANUP_USER4PYPI` and `$PYPI_CLEANUP_USER4TEST` to override `--user` per index.
 > * Set `$PYPI_CLEANUP_PASSWORD` to your account's login password to skip its password prompt.
-> * `pypi-cleanup` has no variable for the authenticator secret: every run prompts for the 6-digit code. Set `$PYPI_CLEANUP_TOTP_SECRET` (or its `4PYPI`/`4TEST` form) and the TUI computes the current code with `pyotp`, printing it and the seconds it has left above each run for that prompt; a code with 10 seconds or fewer left is slept out first so the next one can be typed.
-> * Scope the password to one index with a `4PYPI` or `4TEST` suffix -- `$PYPI_CLEANUP_PASSWORD4TEST` -- and the TUI passes it as the base variable only when that index is in use. The TOTP secret takes the same suffixes, choosing which secret the TUI computes from. Each base variable is left untouched when its suffix form is unset. `$PYPI_CLEANUP_USER4PYPI` and `$PYPI_CLEANUP_USER4TEST` work similarly to override `--user` per index.
-> * **The machine running this TUI must be "trusted".** If `pypi-cleanup` fails with an authentication or unrecognized device error (initially or later), log into pypi.org/test.pypi.org using a browser on this same machine, and choose to remember the device for 30 days.
+>   * If the pypi and test passwords differ, scope them by appending `4PYPI` or `4TEST` to the names, and this TUI overrides `$PYPI_CLEANUP_PASSWORD` according to scope.
+> * Set `$PYPI_CLEANUP_TOTP_SECRET` (and/or its scoped forms) to let this TUI supply the 6-digit code through the method above.
+> * **"Trusted" device issues**: If `pypi-cleanup` fails with an authentication or unrecognized device error (initially or later), log into pypi.org or test.pypi.org from a browser on this same machine and choose to remember the device for 30 days.
 
 ### Options are remembered
 
-Your package list, sort order, date zone, gap, theme, user and index persist in `~/.config/pypi-cleanup-tui/config.ini`, so a bare `pypi-cleanup-tui` starts with you previous options. `--read-only` deliberately does not persist.
+Your package list, sort order, date zone, gap, theme, user, index and TOTP method persist in `~/.config/pypi-cleanup-tui/config.ini`, so a bare `pypi-cleanup-tui` starts with your previous options. `--read-only` deliberately does not persist.
 
 ```bash
 pypi-cleanup-tui newpack   # newpack, then the stored names

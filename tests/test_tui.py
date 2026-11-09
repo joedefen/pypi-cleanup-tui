@@ -8,7 +8,9 @@ whatever terminal happens to run them.
 from __future__ import annotations
 
 import curses
+import sys
 from datetime import UTC, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from console_window import Theme, appearance
@@ -23,12 +25,16 @@ from pypi_cleanup_tui.main import (
     HOST_TEST,
     SORT_BY_DATE,
     SORT_BY_VERSION,
+    TOTP_OFF,
     CleanupTui,
     Release,
 )
 
 NOW = datetime(2024, 5, 1, 12, 0, tzinfo=UTC)
 EDT = timezone(timedelta(hours=-4), 'EDT')
+
+#: A valid base32 TOTP secret (RFC 6238's SHA-1 seed).
+TOTP_SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'
 
 
 @pytest.fixture(autouse=True)
@@ -96,7 +102,7 @@ def _mixed():
 
 def _app(cleanup=None, rows=20, cols=100, ini=None, zone=None,
          theme=None, no_color=None, sort=None, gap=None, read_only=None,
-         packages=None):
+         packages=None, totp_method=None):
     return tui_mod.CleanupApp(
         cleanup or _cleanup(),
         backend=HeadlessBackend(rows=rows, cols=cols),
@@ -109,6 +115,7 @@ def _app(cleanup=None, rows=20, cols=100, ini=None, zone=None,
         gap=gap if gap is not None else tui_mod.DEFAULT_GAP,
         read_only=bool(read_only),
         packages=packages,
+        totp_method=totp_method or tui_mod.DEFAULT_TOTP_METHOD,
     )
 
 
@@ -1752,6 +1759,165 @@ def test_a_missing_cleanup_tool_is_reported(monkeypatch, capsys):
     assert 'could not run pypi-cleanup' in capsys.readouterr().out
 
 
+class _FakeChild:
+    """A stand-in for pexpect's spawn object; records what the runner does."""
+
+    def __init__(self, status=0, before=''):
+        self.calls = []
+        self.exitstatus = status
+        self.before = before
+        self.after = ''
+        self.closed = False
+
+    def interact(self, escape_character=None):
+        self.calls.append(('interact', escape_character))
+
+    def sendline(self, line):
+        self.calls.append(('sendline', line))
+
+    def expect(self, pattern):
+        self.calls.append(('expect', pattern))
+
+    def close(self):
+        self.closed = True
+
+
+def _fake_pexpect(child, spawn=None):
+    """A module-shaped pexpect stand-in for the runner's injection point."""
+    class FakeEOF(Exception):
+        pass
+
+    class FakeTimeout(Exception):
+        pass
+
+    class FakeExceptionPexpect(Exception):
+        pass
+
+    return SimpleNamespace(
+        EOF=FakeEOF,
+        TIMEOUT=FakeTimeout,
+        ExceptionPexpect=FakeExceptionPexpect,
+        spawn=spawn if spawn is not None else (lambda *args, **kwargs: child),
+    )
+
+
+def test_the_expect_run_sends_a_code_after_the_escape(monkeypatch, capsys):
+    child = _FakeChild(status=0, before='deleted\n')
+    spawned = []
+
+    def spawn(*args, **kwargs):
+        spawned.append((args, kwargs))
+        return child
+
+    module = _fake_pexpect(child, spawn)
+    monkeypatch.setattr(
+        tui_mod.totp, 'code_with_room', lambda secret: ('123456', 30))
+
+    status = tui_mod.run_cleanup_expect(
+        ['pypi-cleanup', '--do-it'], TOTP_SECRET, {'PATH': '/bin'},
+        pexpect_module=module)
+
+    assert status == 0
+    assert spawned == [(('pypi-cleanup', ['--do-it']), {
+        'encoding': 'utf-8',
+        'timeout': tui_mod.EXPECT_TIMEOUT,
+        'env': {'PATH': '/bin'},
+    })]
+    assert child.calls == [
+        ('interact', tui_mod.EXPECT_ESCAPE),
+        ('sendline', '123456'),
+        ('expect', module.EOF),
+    ]
+    assert child.closed is True
+    assert capsys.readouterr().out == 'deleted\n'
+
+
+def test_the_auto_run_waits_for_the_prompt_without_giving_control(
+        monkeypatch, capsys):
+    child = _FakeChild(status=0, before='POSSIBLE DESTRUCTIVE OPERATION\n')
+    child.after = 'Authentication code: '
+    module = _fake_pexpect(child)
+    monkeypatch.setattr(
+        tui_mod.totp, 'code_with_room', lambda secret: ('123456', 30))
+
+    status = tui_mod.run_cleanup_auto(
+        ['pypi-cleanup', '--do-it'], TOTP_SECRET, pexpect_module=module)
+
+    assert status == 0
+    # No interact: control is never handed to the user.
+    assert child.calls == [
+        ('expect', tui_mod.TOTP_PROMPT_PATTERN),
+        ('sendline', '123456'),
+        ('expect', module.EOF),
+    ]
+    out = capsys.readouterr().out
+    assert 'POSSIBLE DESTRUCTIVE OPERATION' in out
+    assert 'Authentication code: ' in out
+
+
+def test_expect_unavailable_when_spawn_fails():
+    def spawn(*args, **kwargs):
+        raise OSError('no pty')
+
+    module = _fake_pexpect(None, spawn)
+
+    with pytest.raises(tui_mod.ExpectUnavailable):
+        tui_mod.run_cleanup_expect(
+            ['pypi-cleanup'], TOTP_SECRET, pexpect_module=module)
+
+
+def test_expect_unavailable_when_pexpect_is_missing(monkeypatch):
+    monkeypatch.setitem(sys.modules, 'pexpect', None)
+
+    with pytest.raises(tui_mod.ExpectUnavailable):
+        tui_mod.run_cleanup_expect(['pypi-cleanup'], TOTP_SECRET)
+
+
+def test_expect_unavailable_when_the_secret_is_invalid():
+    module = _fake_pexpect(_FakeChild())
+
+    with pytest.raises(tui_mod.ExpectUnavailable):
+        tui_mod.run_cleanup_expect(
+            ['pypi-cleanup'], 'not base 32!', pexpect_module=module)
+
+
+def test_an_expect_run_that_times_out_reports_failure(monkeypatch, capsys):
+    child = _FakeChild(status=None)
+    module = _fake_pexpect(child)
+
+    def timeout(pattern):
+        raise module.TIMEOUT('slow')
+
+    child.expect = timeout
+    monkeypatch.setattr(
+        tui_mod.totp, 'code_with_room', lambda secret: ('123456', 30))
+
+    status = tui_mod.run_cleanup_expect(
+        ['pypi-cleanup'], TOTP_SECRET, pexpect_module=module)
+
+    assert status == 1
+    assert child.closed is True
+    assert 'did not finish within' in capsys.readouterr().out
+
+
+def test_a_child_that_leaves_before_the_code_is_reported(monkeypatch, capsys):
+    child = _FakeChild(status=2)
+    module = _fake_pexpect(child)
+
+    def sendline(line):
+        raise OSError('pty closed')
+
+    child.sendline = sendline
+    monkeypatch.setattr(
+        tui_mod.totp, 'code_with_room', lambda secret: ('123456', 30))
+
+    status = tui_mod.run_cleanup_expect(
+        ['pypi-cleanup'], TOTP_SECRET, pexpect_module=module)
+
+    assert status == 2
+    assert 'could not supply the code' in capsys.readouterr().out
+
+
 def test_the_summary_line_reports_the_exit_status():
     assert (tui_mod.summary_line('Deletion', 'demo', 0)
             == "Deletion finished for 'demo'.")
@@ -1870,7 +2036,7 @@ def test_the_hand_off_maps_the_hosts_scoped_credentials(monkeypatch, capsys):
 
 
 def test_the_hand_off_prints_the_code_before_the_run(monkeypatch, capsys):
-    app = _app()
+    app = _app(totp_method=tui_mod.TOTP_PRINT)
     answers = iter([True, False])   # yes to the dry run, no to the deletion
     try:
         monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
@@ -1896,6 +2062,159 @@ def test_the_hand_off_prints_the_code_before_the_run(monkeypatch, capsys):
         assert (out.index('--query-only')
                 < out.index('Authentication code:')
                 < out.index('Dry run finished'))
+    finally:
+        app.win.stop_curses()
+
+
+def test_expect_method_prints_the_banner_and_runs_pexpect(monkeypatch, capsys):
+    app = _app(totp_method=tui_mod.TOTP_EXPECT)
+    answers = iter([True, False])   # yes to the dry run, no to the deletion
+    calls = []
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no',
+            lambda question, default: next(answers),
+        )
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup',
+            lambda command, env=None: pytest.fail('plain run used'))
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup_expect',
+            lambda command, secret, env=None: calls.append(
+                (command, secret, env)) or 0,
+        )
+        monkeypatch.setenv('PYPI_CLEANUP_TOTP_SECRET', TOTP_SECRET)
+
+        app.hand_off_to_cleanup(['2.0'])
+
+        out = capsys.readouterr().out
+        assert '|\n| About to run pypi-cleanup...' in out
+        assert 'press Ctrl+]' in out
+        assert 'supply the code automatically.\n|' in out
+        assert calls[0][0][1] == '--query-only'
+        assert calls[0][1] == TOTP_SECRET
+    finally:
+        app.win.stop_curses()
+
+
+def test_auto_method_runs_pexpect_without_the_banner(monkeypatch, capsys):
+    app = _app(totp_method=tui_mod.TOTP_AUTO)
+    answers = iter([True, False])
+    calls = []
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no',
+            lambda question, default: next(answers),
+        )
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup',
+            lambda command, env=None: pytest.fail('plain run used'))
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup_auto',
+            lambda command, secret, env=None: calls.append(
+                (command, secret, env)) or 0,
+        )
+        monkeypatch.setenv('PYPI_CLEANUP_TOTP_SECRET', TOTP_SECRET)
+
+        app.hand_off_to_cleanup(['2.0'])
+
+        out = capsys.readouterr().out
+        assert 'About to run pypi-cleanup...' not in out
+        assert 'press Ctrl+]' not in out
+        assert calls[0][0][1] == '--query-only'
+        assert calls[0][1] == TOTP_SECRET
+    finally:
+        app.win.stop_curses()
+
+
+def test_expect_method_without_a_secret_uses_the_plain_run(monkeypatch):
+    app = _app(totp_method=tui_mod.TOTP_EXPECT)
+    answers = iter([True, False])
+    runs = []
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no',
+            lambda question, default: next(answers),
+        )
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup',
+            lambda command, env=None: runs.append(command) or 0)
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup_expect',
+            lambda *args, **kwargs: pytest.fail('no secret to send'))
+
+        app.hand_off_to_cleanup(['2.0'])
+
+        assert [command[1] for command in runs] == ['--query-only']
+    finally:
+        app.win.stop_curses()
+
+
+def test_expect_that_cannot_start_falls_back_to_the_plain_run(
+        monkeypatch, capsys):
+    app = _app(totp_method=tui_mod.TOTP_EXPECT)
+    answers = iter([True, False])
+    runs = []
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no',
+            lambda question, default: next(answers),
+        )
+
+        def unavailable(command, secret, env=None):
+            raise tui_mod.ExpectUnavailable('no pty')
+
+        monkeypatch.setattr(tui_mod, 'run_cleanup_expect', unavailable)
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup',
+            lambda command, env=None: runs.append(command) or 0)
+        monkeypatch.setattr(
+            tui_mod.totp, 'code_with_room', lambda secret: ('123456', 30))
+        monkeypatch.setenv('PYPI_CLEANUP_TOTP_SECRET', TOTP_SECRET)
+
+        app.hand_off_to_cleanup(['2.0'])
+
+        out = capsys.readouterr().out
+        assert 'pexpect could not start' in out
+        assert 'Authentication code: 123456' in out
+        assert [command[1] for command in runs] == ['--query-only']
+    finally:
+        app.win.stop_curses()
+
+
+def test_off_method_leaves_the_prompt_to_the_user(monkeypatch, capsys):
+    app = _app(totp_method=TOTP_OFF)
+    answers = iter([True, False])
+    runs = []
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no',
+            lambda question, default: next(answers),
+        )
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup',
+            lambda command, env=None: runs.append(command) or 0)
+        monkeypatch.setattr(
+            tui_mod, 'run_cleanup_expect',
+            lambda *args, **kwargs: pytest.fail('expect used in off mode'))
+        monkeypatch.setenv('PYPI_CLEANUP_TOTP_SECRET', TOTP_SECRET)
+
+        app.hand_off_to_cleanup(['2.0'])
+
+        out = capsys.readouterr().out
+        assert 'Authentication code: ' not in out
+        assert 'press Ctrl+]' not in out
+        assert [command[1] for command in runs] == ['--query-only']
     finally:
         app.win.stop_curses()
 

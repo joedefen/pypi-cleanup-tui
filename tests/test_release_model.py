@@ -420,6 +420,60 @@ def test_a_gap_that_is_not_a_number_falls_back_to_the_default():
     assert cli._normalize_gap(None) == cli.DEFAULT_GAP
 
 
+def test_the_totp_method_defaults_to_expect_and_is_passed_on(
+        monkeypatch, config_path):
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo'], config_path=config_path) == 0
+
+    _, kwargs = seen[0]
+    assert kwargs['totp_method'] == cli.TOTP_EXPECT
+    assert stored(config_path).vals.totp_method == cli.TOTP_EXPECT
+
+
+def test_a_totp_method_argument_is_stored(monkeypatch, config_path):
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo', '--totp-method', 'print'],
+                    config_path=config_path) == 0
+
+    _, kwargs = seen[0]
+    assert kwargs['totp_method'] == cli.TOTP_PRINT
+    assert stored(config_path).vals.totp_method == cli.TOTP_PRINT
+
+
+def test_the_auto_totp_method_is_stored(monkeypatch, config_path):
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo', '--totp-method', 'auto'],
+                    config_path=config_path) == 0
+
+    _, kwargs = seen[0]
+    assert kwargs['totp_method'] == cli.TOTP_AUTO
+    assert stored(config_path).vals.totp_method == cli.TOTP_AUTO
+
+
+def test_the_stored_totp_method_is_used_at_startup(monkeypatch, config_path):
+    stored(config_path, totp_method=cli.TOTP_OFF)
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo'], config_path=config_path) == 0
+
+    assert seen[0][1]['totp_method'] == cli.TOTP_OFF
+
+
+def test_an_unknown_stored_totp_method_falls_back(
+        monkeypatch, config_path):
+    stored(config_path, totp_method='wat')
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['demo'], config_path=config_path) == 0
+
+    assert seen[0][1]['totp_method'] == cli.DEFAULT_TOTP_METHOD
+    # The fallback is written back, so the bad value does not return.
+    assert stored(config_path).vals.totp_method == cli.DEFAULT_TOTP_METHOD
+
+
 def test_the_theme_switch_is_stored_and_passed_on(monkeypatch, config_path):
     monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
     seen = capture_tui(monkeypatch)

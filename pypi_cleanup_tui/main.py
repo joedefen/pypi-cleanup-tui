@@ -8,7 +8,8 @@ alert over the table instead of ending the run before anything is drawn.
 
 The command line remembers what it was told.  The user, the index, the package
 list, the settings the TUI can change (``zone``, ``sort`` and the stability
-``gap``), and the appearance choices (``theme`` and ``no_color``) are kept in
+``gap``), the appearance choices (``theme`` and ``no_color``), and the
+authenticator method (``totp_method``) are kept in
 ``~/.config/pypi-cleanup-tui/config.ini``, and every option's default is the
 stored value -- so a second run can be just ``pypi-cleanup-tui``.
 
@@ -87,6 +88,19 @@ GAP_CHOICES = (3, 7, 14, 30, 60)
 #: is the first-run default and the fallback for a stored value nobody knows.
 DEFAULT_GAP = 30
 
+#: How the TUI supplies the six-digit authenticator code ``pypi-cleanup``
+#: prompts for.  ``expect`` drives that prompt through pexpect and sends a
+#: fresh code after the user presses Ctrl+]; ``auto`` also uses pexpect but
+#: sends the code at the prompt without handing control back; ``print`` only
+#: prints the code above each run; ``off`` leaves the prompt to the user.
+#: ``expect`` is the default, and the choice is remembered like the others.
+TOTP_EXPECT = 'expect'
+TOTP_AUTO = 'auto'
+TOTP_PRINT = 'print'
+TOTP_OFF = 'off'
+TOTP_METHODS = (TOTP_EXPECT, TOTP_AUTO, TOTP_PRINT, TOTP_OFF)
+DEFAULT_TOTP_METHOD = TOTP_EXPECT
+
 #: Seconds to wait for the PyPI JSON API.
 REQUEST_TIMEOUT = 30.0
 
@@ -102,6 +116,7 @@ DEFAULTS = {
     'gap': DEFAULT_GAP,
     'theme': '',
     'no_color': False,
+    'totp_method': DEFAULT_TOTP_METHOD,
 }
 
 
@@ -392,6 +407,16 @@ def _build_parser(vals: SimpleNamespace) -> argparse.ArgumentParser:
              f' [dflt={vals.user or "(none)"}]',
     )
     parser.add_argument(
+        "--totp-method",
+        choices=TOTP_METHODS,
+        default=vals.totp_method,
+        help="how to supply the authenticator code: 'expect' (default) drives "
+             "the pypi-cleanup prompt and sends the code at Ctrl+], 'auto' "
+             "sends it without handing control back, 'print' only prints it "
+             "above each run, 'off' leaves the prompt to you "
+             f"[dflt={vals.totp_method}]",
+    )
+    parser.add_argument(
         "--theme",
         type=_theme_choice,
         default=None,
@@ -444,6 +469,8 @@ def main(
     zone = _normalize(vals.zone, ZONES, UTC_MODE)
     sort = _normalize(vals.sort, SORTS, SORT_BY_VERSION)
     gap = _normalize_gap(vals.gap)
+    totp_method = _normalize(
+        args.totp_method, TOTP_METHODS, DEFAULT_TOTP_METHOD)
     # The command line wins; without it the remembered choice is used, and a
     # hand-edited unknown name falls back to "no explicit theme".
     theme = _normalize_theme(args.theme or vals.theme)
@@ -476,6 +503,7 @@ def main(
             gap=gap,
             theme=theme,
             no_color=no_color,
+            totp_method=totp_method,
         )
     except OSError as exc:
         print(f"warning: could not save {ini.config_file_path}: {exc}", file=sys.stderr)
@@ -494,6 +522,7 @@ def main(
         packages=packages,
         theme=args.theme,
         no_color=args.no_color,
+        totp_method=totp_method,
     )
 
 
