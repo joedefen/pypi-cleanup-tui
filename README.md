@@ -8,7 +8,7 @@ A thin, visual skin over [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/
 - `pypi-cleanup` directly when cull rules are expressible and reusable (`.*rc\d+`, keep-newest, before-a-date), especially for automation across many packages.
 
 ```text
- del x:mark X:mark▼ sort zone gap60 quit ?:help /
+ del x:mark X:mark▼ sort zone gap60 fresh quit ?:help /
  User=betazoid pack=vappman host=pypi
  DEL DATE (UTC)        DAYS  *VERSION
 ────────────────────────────────
@@ -19,16 +19,16 @@ A thin, visual skin over [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/
      2026/03/01 19:37   251  2.1.6
 ```
 
-*The main screen (a mock-up; a GIF is planned). One release is marked `✘` and the pick sits on `2.1.7`. `x` marks a release, `X` marks everything below the pick, `d` previews and then performs the deletion, `?` lists every key, and `p` moves to the next package.*
+*The main screen (a mock-up; a GIF is planned). One release is marked `✘` for deletion; `?` lists every key.*
 
 ## Features
 
-- A package's whole history in one table, with upload date and age in calendar days (yesterday counts as 1, counted in the zone `z` shows), so a stale release is visible instead of inferred from a version number.
-- Mark with `x`, mark a whole run below the pick with `X`, clear with `u`/`U` -- a selection you can see, with no pattern to get wrong.
-- A stability gap (`g`) keeps the releases that stayed current for 3, 7, 14, 30 or 60 days: the ones people actually installed.
-- Search (`/`) over the versions, after which the marking keys touch only the visible rows.
+- A package's whole history in one table, with upload date and age in calendar days, so a stale release is visible at a glance.
+- Mark with `x`/`X`, clear with `u`/`U` -- a selection you can see, with no pattern to get wrong.
+- A stability gap (`g`) unmarks the releases a newer one superseded too soon: what stays is what people actually installed.
+- Search (`/`) over the versions; while a pattern is in force, the marking keys touch only the visible rows.
 - Move between packages with `p`/`P`, between indexes with `h`, sort with `s`, change the date zone with `z`.
-- Every deletion is a dry run first, with the command and its report shown before a second confirmation; `--read-only` browses with no delete key and no `pypi-cleanup` install.
+- Every deletion is a dry run first, with the command and its report shown before a second confirmation; a read-only run browses with no delete key.
 
 ## Installation
 
@@ -37,25 +37,24 @@ pipx install -f pypi-cleanup-tui   # install or refresh; -f makes one command do
 pipx install -f pypi-cleanup       # the tool the TUI hands the deletion to
 ```
 
-> **Note:** pipx gives the TUI its own environment; the package itself needs Python 3.11 or newer. The TUI exposes only part of [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/); for anything it lacks, run that tool directly. `--read-only` browses without it installed.
+> **Note:** pipx gives the TUI its own environment; the package needs Python 3.11 or newer. The TUI exposes only part of [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/); run that tool directly for anything it lacks, and a read-only run browses without it installed.
 
 ## Usage
 
 ### Command line
 
 ```bash
-pypi-cleanup-tui package             # one package
-pypi-cleanup-tui pack1,pack2,pack3   # one comma separated list
-pypi-cleanup-tui pack1 pack2 pack3   # ... or one argument each
-pypi-cleanup-tui --host test pack1   # query test.pypi.org instead of pypi.org
-pypi-cleanup-tui -u alice pack1      # the PyPI user, kept for the cleanup step
-pypi-cleanup-tui --theme nord pack1  # install a palette (see the THEMES screen)
-pypi-cleanup-tui --no-color pack1    # attributes instead of color; remembered
-pypi-cleanup-tui --totp-method print pack1   # print the 6-digit code; remembered
-pypi-cleanup-tui --read-only pack1   # browse only: no delete key, no checks
+pypi-cleanup-tui --user alice pack1,pack2 pack3
 ```
 
-The first name is the package the table opens; the rest is kept for `p` and for the next run. Package arguments are cumulative: a run puts its names in front of the remembered list and drops duplicates, keeping the first occurrence.
+The first name is the package the table opens; the rest is kept for `p` and for the next run. Package arguments are cumulative: a run puts its names in front of the remembered list and drops duplicates.
+
+| Featured Option | Meaning |
+| --- | ------- |
+| `-u`, `--user` | the PyPI account, kept for the cleanup step; remembered |
+| `--totp-method` | how the authenticator code is supplied; explained below; remembered |
+| `--totp-dump` | for troubleshooting, show the current authenticator codes for comparison; `Ctrl-C` exits |
+| `-h`, `--help` | see every option and the remembered values |
 
 ### Main screen
 
@@ -69,7 +68,7 @@ The first name is the package the table opens; the rest is kept for `p` and for 
 | `p` | show the next package in the list and reload |
 | `P` | open the package list |
 | `h` | switch between pypi.org and test.pypi.org and reload |
-| `f` | fetch the current package again and clear the marks |
+| `f` | refetch the package; marks stay, and `STALE` clears once the index catches up |
 | `x` | mark the picked release for deletion, then step down |
 | `X` | mark the picked release and every release below it, then step up (unmarked row only) |
 | `u` | unmark the picked release, then step down |
@@ -79,11 +78,11 @@ The first name is the package the table opens; the rest is kept for `p` and for 
 | `d` | leave the table, run a `pypi-cleanup` dry run, then the deletion after a second confirmation |
 | `g` | apply the stability gap on the table; on the help screen, rotate the gap instead |
 
-The second header line is the run: `User=...`, `[p]ack=...` and `[h]ost=...`. `User` shows the account `pypi-cleanup` will act as -- the index's `$PYPI_CLEANUP_USER4...`, else `-u`, else your login name, with `n/a` only when none is known -- `host` shows the index key (`pypi` or `test`) rather than a domain, and `p` and `h` each reload the table. The body then loads: `Loading ...` first, releases after; a failed load opens a modal with the error and leaves the body empty for another package or index.
+The second header line names the run: `User=...`, `[p]ack=...` and `[h]ost=...`; `host` is the index key, not a domain. A bold `STALE` follows `host=` while the index has not caught up with a deletion (see below).
 
-Marked releases take `✘` in `DEL` and dim their other cells, while the releases that will be kept stay in the success color, so both halves of the decision are visible at once. `T` lists the palettes with swatches; its last entry, `mono`, is not a palette but the switch that turns color off, exactly like `--no-color` and the `NO_COLOR` convention, and choosing a palette turns it back on.
+Marked releases take `✘` in `DEL` and dim; the releases that will be kept stay in the success color. `T` lists the palettes; its `mono` entry turns color off.
 
-The column titles are a dim third line, the sorted column carries a `*` (`*VERSION`, or `*DATE (UTC)` after `s`), and the `DATE` title names the zone in force (`DATE (EDT)` after `z`). The keys on the first line are blocks, and a block that does not apply is blanked rather than removed, so nothing to its right moves:
+The column titles are the third header line, with a `*` on the sorted column and the zone named in `DATE`. A key block that does not apply is blanked, so nothing to its right moves:
 
 ```text
 x:mark X:mark▼ sort zone gap30 fresh quit ?:help /     nothing marked, unmarked row
@@ -91,12 +90,14 @@ del unmark Unmark▼ sort zone gap30 fresh quit ?:help /     marked, pick on a m
 R/O unmark Unmark▼ sort zone gap30 fresh quit ?:help /     read-only, d never offered
 ```
 
-An unmarked row offers `x`/`X` and a marked row offers `u`/`U`, the two pairs have the same width, and the row under the pick chooses between them. `del` leads once something is marked and no pattern is filtering -- a filter can hide marked releases, so `d` is inert while one is in force. `--read-only` fills that block with `R/O` and never offers `d`. The search field is the one block whose width follows its text, and the theme key is listed on the help screen only. `f` reloads the package already on screen, dropping every mark, so a release uploaded since the last fetch appears.
+* An unmarked row offers `x`/`X`; a marked row offers `u`/`U`.
+* `d` leads once something is marked and no pattern is filtering; a read-only run shows `R/O` instead.
+* `f` refetches the package: marks follow the versions the index still lists, and `STALE` clears once a deletion is confirmed.
 
 ### Search and the stability gap
 
-- `/` filters on a case-insensitive regular expression over the version column -- `^1\.` for the 1.x releases, `[ab]` for a character class. An empty or not-yet-valid pattern (a lone `[` while it is being typed) leaves the table unfiltered; `ENTER` accepts, `ESC` restores the text the search started with. While a pattern is closed, `x`, `X`, `u` and `U` apply to the visible rows only.
-- `g` means two things. On the help screen it rotates the stability gap -- 3, 7, 14, 30 or 60 days, starting at 30 -- and on the table it applies the gap in force: every marked release that another release superseded within that many days is unmarked, so what stays is what had time to be installed. The days are calendar days in the zone `z` shows, the same unit as the `DAYS` column, so switching zone can move a borderline release across the gap. The newest release counts as stable because nothing followed it. The test is over the whole history, not the visible rows, and `g` only ever unmarks, so a filter cannot hide a release from it. A two-second message reports how many marked releases were kept, and the gap is remembered for the next run.
+* `/` filters the version column with a case-insensitive regular expression; `ENTER` closes it, `ESC` restores the previous text, and a closed pattern limits `x`, `X`, `u` and `U` to the visible rows. An empty or invalid pattern leaves the table unfiltered.
+* On the help screen `g` picks the stability gap; on the table it applies it, unmarking every marked release that a newer release superseded within the gap. Days are calendar days in the zone `z` shows, the newest release counts as stable, and the choice is remembered.
 
 ### Package screen
 
@@ -109,35 +110,36 @@ PACKAGES  x:remove ESC:open ?:help
 ✓ beta        2     0
   gamma       -     -
 ```
-
-The untitled first column carries `✓` once this run has loaded that package; `VERs` is the release count at that load and `DELs` the versions deleted this run (a successful deletion does not update the counter yet). Both show `-` until the package is loaded, because the screen never invents a count. The pick opens on the package `p` would show next, so `ESC` is one keypress from the table's package to the next; it opens that package in the table and returns. `x` removes the picked name from this run's list and leaves the index untouched. With the list emptied there is nothing to open, so `ESC` leaves the program; `?` opens the help screen, whose `ESC` returns to the list.
+* Each row shows whether the package was visited (`✓`), its name, its last known version count and this run's delete count.
+* `ESC` opens the highlighted package in the table.
+* `x` removes the highlighted package from the TUI's list, not from the index.
 
 ### Running `pypi-cleanup`
 
-The table hands the marked releases to [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/), which performs the actual deletion, so a normal run checks for it first and stops with a hint to install it when it is missing. `--read-only` skips that check and disarms the delete key: the run browses the history and the hint line shows `R/O` where `del` would be.
+A normal run first checks that [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/), which performs the actual deletion, is installed, and stops with a hint when it is missing. A read-only run skips that check and shows `R/O` where `del` would be.
 
-Pressing `d` leaves the table for the bare terminal, shows the `pypi-cleanup` command built from the marked versions, runs a `--query-only` dry run, and then asks again before the `--do-it` deletion.
+Pressing `d` leaves the table for the bare terminal, runs a `--query-only` dry run, then asks again before the `--do-it` deletion. Note that:
+- Each question takes `yes`, `no`, or a bare `ENTER` for the safe answer (yes to the dry run, no to the deletion).
+- The printed command is a description, not meant to be copied; a long version pattern is broken after its `|` alternations.
+- When a scoped password supplies a value, a line above the command names the mapping, never the value.
+- If you provide `$PYPI_CLEANUP_TOTP_SECRET`, then `--totp-method` chooses how this TUI assists providing the 6-digit code:
+  - **`expect`** (default) runs `pypi-cleanup` under `pexpect`; you answer prompts until the "Authentication code:" prompt where you press `Ctrl+]` for the TUI to answer.
+  - **`auto`** provides the code w/o manual intervention; you must set `$PYPI_CLEANUP_PASSWORD`, too.
+  - **`print`** shows the code and its remaining lifetime above each run; you type it at the prompt (be quick or it may expire).
+  - **`off`** leaves answering entirely to you; same behavior as no `$PYPI_CLEANUP_TOTP_SECRET`.
 
-- Each question takes `yes`, `no`, or a bare `ENTER` for the safe answer (yes to the dry run, no to the deletion); a no to the deletion leaves the index alone, and the final `ENTER` returns to the table.
-- The printed command is a description, not something to paste into a shell: the values are quoted for reading and a long version pattern is broken after its `|` alternations.
-- When a scoped password supplies a value, one extra line above the command names the mapping, never the value.
-- The authenticator prompt is handled by the `--totp-method` in force, once a secret is set in `$PYPI_CLEANUP_TOTP_SECRET` or its scoped form; with none, every method leaves the prompt to you.
-  - **`expect`** (default) prints a short `|` banner, runs `pypi-cleanup` under `pexpect`, and sends a fresh code when you press `Ctrl+]` at the `Authentication code:` prompt. If `pexpect` cannot start the run, the code is printed instead.
-  - **`auto`** also uses `pexpect` but never hands the terminal back: use it when you supply the password too, so the only prompt is for the code.
-  - **`print`** shows the current code and its remaining lifetime above each run, sleeping out a code with 10 seconds or less left; you type it at the prompt.
-  - **`off`** leaves the prompt entirely to you and your own authenticator app.
+A successful deletion hides the deleted versions and and re-fetches the version list. If the fetched list has deleted versions (its CDN can lag), a bold `STALE` appears in the header until `f` finds the a new version list credibly up-to-date; switching the packages or host drops the `STALE` indicator.
 
 > **Hints for credentials (to reduce interactive prompts)**
 >
-> * Set `$PYPI_CLEANUP_USER4PYPI` and `$PYPI_CLEANUP_USER4TEST` to override `--user` per index.
-> * Set `$PYPI_CLEANUP_PASSWORD` to your account's login password to skip its password prompt.
+> * Set `$PYPI_CLEANUP_USER4PYPI` and `$PYPI_CLEANUP_USER4TEST` to override the run's user per index (only needed if the two user names differ).
+> * Set `$PYPI_CLEANUP_PASSWORD` to your account's login password to avoid the `pypi-cleanup` password prompt.
 >   * If the pypi and test passwords differ, scope them by appending `4PYPI` or `4TEST` to the names, and this TUI overrides `$PYPI_CLEANUP_PASSWORD` according to scope.
-> * Set `$PYPI_CLEANUP_TOTP_SECRET` (and/or its scoped forms) to let this TUI supply the 6-digit code through the method above.
-> * **"Trusted" device issues**: If `pypi-cleanup` fails with an authentication or unrecognized device error (initially or later), log into pypi.org or test.pypi.org from a browser on this same machine and choose to remember the device for 30 days.
+> * Set `$PYPI_CLEANUP_TOTP_SECRET` (and/or its scoped forms) to let this TUI supply the 6-digit code per the `--totp-method`.
 
 ### Options are remembered
 
-Your package list, sort order, date zone, gap, theme, user, index and TOTP method persist in `~/.config/pypi-cleanup-tui/config.ini`, so a bare `pypi-cleanup-tui` starts with your previous options. `--read-only` deliberately does not persist.
+Your package list, sort order, date zone, gap, theme, user, index and TOTP method persist in `~/.config/pypi-cleanup-tui/config.ini`, so a bare `pypi-cleanup-tui` starts with your previous options. Read-only mode is never remembered.
 
 ```bash
 pypi-cleanup-tui newpack   # newpack, then the stored names
@@ -145,6 +147,11 @@ pypi-cleanup-tui pack2     # an already stored name keeps its position
 ```
 
 `?` lists the saved options and the file they came from.
+
+## Troubleshooting and Precautions
+* **Stale Version Lists**: the TUI asks the index not to cache, but a proxy or corporate network can still serve old data for up to 15 minutes. `f` refetches; after a deletion the header shows `STALE` until the index stops listing the deleted versions.
+* **Authenticator/TOTP (Time-based One-time Password) Failures**: if the TUI's codes are rejected, check the machine's clock is NTP-synced and compare the dumped codes with your authenticator app. If the times agree but the codes do not, recheck the secret.
+* **General Credential Failures**: If `pypi-cleanup` fails with an authentication or unrecognized device error (initially or later), log into `pypi.org` and/or `test.pypi.org` from a browser on this same machine and choose to remember the device for 30 days.
 
 ## License
 

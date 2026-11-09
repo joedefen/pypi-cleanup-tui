@@ -19,6 +19,11 @@ start without it.  ``--read-only`` skips that check and keeps the table from
 ever offering to delete: it is the way to browse a machine that does not have
 the deletion program, and the way to try the interface without any risk.
 
+``--totp-dump`` is a standalone report rather than a run of the table: it prints
+the current code in force for each index whose TOTP secret is set, refreshing
+every three seconds until Ctrl-C.  It runs before the package and tool checks,
+so it needs no package name and stores no options.
+
 Package arguments are cumulative rather than replacing the stored list: a run's
 names go in front of the remembered ones, and a name both lists hold keeps its
 first position.  The first name is therefore the package the table opens, and a
@@ -426,6 +431,14 @@ def _build_parser(vals: SimpleNamespace) -> argparse.ArgumentParser:
              f"[dflt={vals.totp_method}]",
     )
     parser.add_argument(
+        "--totp-dump",
+        action="store_true",
+        help="print the authenticator code in force for pypi and test -- each "
+             "index uses its scoped secret, else the unscoped one -- "
+             "refreshing every 3 seconds, and exit on Ctrl-C; needs no "
+             "package name",
+    )
+    parser.add_argument(
         "--theme",
         type=_theme_choice,
         default=None,
@@ -459,6 +472,15 @@ def main(
     vals = ini.vals
     parser = _build_parser(vals)
     args = parser.parse_args(argv)
+
+    # The dump is a standalone report: it names no package and deletes nothing,
+    # so it runs before the package, tool and saved-option handling below.
+    # Imported here for the same reason run_tui is: a plain dump never loads
+    # the terminal stack.
+    if args.totp_dump:
+        from pypi_cleanup_tui.tui import dump_totp_codes
+
+        return dump_totp_codes()
 
     # The command line is cumulative: this run's names go in front of the
     # remembered list, and duplicates keep their first position.  An empty

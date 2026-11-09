@@ -64,19 +64,31 @@ a dry run, shows what that run reports, and then asks before deleting for
 real.  Both questions take ``yes``, ``no``, or a bare ENTER, which chooses the
 safe answer: the dry run is on by default and the deletion is off.  A deletion
 that fails is offered again behind a ``RETRY:`` prompt until it succeeds or the
-user declines.  Once a deletion succeeds the table re-queries the package and
-drops every trace of the old view -- markings, the search pattern and the pick
--- exactly as if the package/host pair had just been entered, so the refreshed
-history is what the user sees when the final ENTER brings the table back.  A
-``--read-only`` run never offers ``d``: the hint block reads ``R/O`` instead,
-always.
+user declines.  A successful deletion is believed before it is re-verified: the
+versions leave the table at once, and the re-query runs behind that local view,
+because the index's CDN may keep serving the old history for up to fifteen
+minutes.  While a deleted version is still listed it stays hidden, and the
+summary line carries a bold ``STALE`` after ``host=``; a fetch that no longer
+lists it clears both.  Every trace of the old view -- the marks, the search
+pattern and the pick -- is dropped, exactly as if the package/host pair had just
+been entered, so the refreshed history is what the user sees when the final
+ENTER brings the table back, and switching package or index clears the marker
+with the old table.  A ``--read-only`` run never offers ``d``: the hint block
+reads ``R/O`` instead, always.
 
 ``f`` fetches the current package's history again without leaving the package,
-which is how a release uploaded since the table was opened shows up.  The
-refreshed table starts with no marks, so the deletion decisions made before the
-fetch are not silently carried onto rows the user has not seen, and the pick
-starts over with the new table.  The keys ``p`` and ``h`` reload the table too,
-but they first change which package or index is queried.
+which is how a release uploaded since the table was opened shows up.  The marks
+in force survive the fetch: each marked version is put back on the row that
+lists it in the refreshed history, because the decision was about a release, not
+about the row it happened to sit on.  A version the index no longer lists has
+nothing left to delete and stays gone, and a failed fetch restores nothing
+because it leaves the table as empty as any other failed load.  ``f`` is also
+how the ``STALE`` marker is settled: once the index has caught up with a
+deletion the marker clears and a brief ``Fresh`` says so, while a deleted version
+the index still lists keeps the marker.  The pick starts over with the new
+table.  The keys ``p`` and ``h`` reload the table too, but they first change
+which package or index is queried, so their marks are dropped with the old table
+and their fetch starts without a marker.
 
 ``g`` is the stability filter, and it means something different on each screen:
 on the help screen it rotates the gap -- 3, 7, 14, 30 or 60 days -- and on the
@@ -109,7 +121,9 @@ import curses
 import os
 import re
 import subprocess
+import sys
 import textwrap
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -140,6 +154,7 @@ from pypi_cleanup_tui.main import (
     GAP_CHOICES,
     HOST_PYPI,
     HOST_TEST,
+    HOSTS,
     LOCAL_MODE,
     MONO_THEME,
     SORT_BY_DATE,
@@ -153,8 +168,9 @@ from pypi_cleanup_tui.main import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from datetime import tzinfo
+    from typing import TextIO
 
     from console_window.backend import RenderBackend
 
@@ -238,6 +254,20 @@ EXPECT_ESCAPE = '\x1d'
 #: generous: a change from "Authentication code:" to "authentication code "
 #: must still match, and the case is not part of the contract.
 TOTP_PROMPT_PATTERN = r'(?i)authentication code[: ]'
+
+#: Seconds between two blocks of the ``--totp-dump`` table.  The code itself
+#: changes only every :data:`pypi_cleanup_tui.totp.TOTP_INTERVAL` seconds, so
+#: three seconds keeps the countdown readable without scrolling the terminal.
+TOTP_DUMP_INTERVAL = 3.0
+
+#: Width of one index's group after its host name: ``": 123456 30s"``.  The
+#: seconds are padded to two digits, so a group is the same width on every
+#: block and the next host starts in the same column all the way down.
+TOTP_GROUP_WIDTH = len(': ') + 6 + len(' ') + 2 + len('s')
+
+#: The space between two indexes' groups on the dump line.  Modest on purpose:
+#: the groups read apart without pushing the second host off an 80-cell line.
+TOTP_GROUP_GAP = '    '
 
 #: The block-quote instructions shown before an ``expect`` run.  The banner is
 #: printed before pexpect starts, so the user knows the escape is available
@@ -415,6 +445,89 @@ def show_authentication_code(host: str,
         print(f'warning: {error}')
     else:
         print(totp.format_code(code, remaining))
+
+
+def no_totp_secrets_message() -> str:
+    """The advice ``--totp-dump`` prints when the environment holds no secret."""
+    names = [totp.TOTP_SECRET_ENV_VAR]
+    names += [totp.TOTP_SECRET_ENV_VAR + suffix
+              for suffix in CREDENTIAL_SUFFIXES.values()]
+    return (f'no TOTP secrets are set ({", ".join(names)}), '
+            'so there is nothing to dump.')
+
+
+def totp_dump_rows(
+    environ: Mapping[str, str] | None = None,
+) -> list[tuple[str, str]]:
+    """The secret in force for each index, as ``(host, secret)`` pairs.
+
+    Each index resolves its secret the way a run does: the ``4PYPI``/``4TEST``
+    form first, then the unscoped variable.  An index with neither is left out,
+    so the dump shows only the hosts it can actually supply a code for.
+    """
+    env = os.environ if environ is None else environ
+    rows: list[tuple[str, str]] = []
+    for host in HOSTS:
+        secret = totp_secret(host, env)
+        if secret:
+            rows.append((host, secret))
+    return rows
+
+
+def format_totp_group(host: str, secret: str, moment: float) -> str:
+    """One index's ``host: code 30s`` group on the dump line.
+
+    A secret that cannot be computed puts its error where the code would be
+    instead of ending the dump.
+    """
+    try:
+        code, remaining = totp.code_and_remaining(secret, moment)
+    except ValueError as error:
+        return f'{host}: {error}'
+    return f'{host}: {code} {remaining:>2}s'
+
+
+def format_totp_line(moment: float, rows: Sequence[tuple[str, str]]) -> str:
+    """The dump's one line: the clock, then each index's group side by side.
+
+    The clock leads the line so it reads as one moment in time, and every group
+    is padded to :data:`TOTP_GROUP_WIDTH` past its host name, so the hosts and
+    codes sit in the same columns on every block.
+    """
+    clock = time.strftime('%H:%M:%S', time.localtime(moment))
+    groups = []
+    for host, secret in rows:
+        width = len(host) + TOTP_GROUP_WIDTH
+        groups.append(format_totp_group(host, secret, moment).ljust(width))
+    return f'{clock}  {TOTP_GROUP_GAP.join(groups)}'.rstrip()
+
+
+def dump_totp_codes(
+    environ: Mapping[str, str] | None = None,
+    clock: Callable[[], float] = time.time,
+    sleep: Callable[[float], None] = time.sleep,
+    out: TextIO | None = None,
+) -> int:
+    """Print the code in force for each index, a line every three seconds.
+
+    One line per refresh carries the clock and a group per index, so the same
+    columns can be read straight down the terminal.  With no secret at all
+    there is nothing to dump: the message names the variables and the status is
+    ``1``.  Ctrl-C is the way out, so it ends the loop and returns ``0``
+    instead of raising.
+    """
+    rows = totp_dump_rows(environ)
+    if not rows:
+        print(no_totp_secrets_message(), file=sys.stderr)
+        return 1
+    stream = sys.stdout if out is None else out
+    try:
+        while True:
+            print(format_totp_line(clock(), rows), file=stream)
+            stream.flush()
+            sleep(TOTP_DUMP_INTERVAL)
+    except KeyboardInterrupt:
+        return 0
 
 
 def _quoted(value: str) -> str:
@@ -951,6 +1064,15 @@ class CleanupApp:
         #: State for the frame drawn while :meth:`load_versions` fetches.
         self.loading = False
         self.load_failed = False
+        #: Versions this session deleted that a refetch has not yet dropped.
+        #: They are hidden from the table even while the index still lists
+        #: them, because the local table is the one place that knows the
+        #: deletion happened; the CDN may serve the old history for a while.
+        self.hidden_versions: set[str] = set()
+        #: Whether the last successful fetch still listed a hidden version.
+        #: The summary line says ``STALE`` while it does, so a table that hides
+        #: rows the index still reports never pretends to be current.
+        self.stale = False
         #: Text of the incremental search.  An empty string shows every
         #: release; anything else narrows the body to the matching rows.
         self.search_text = ''
@@ -1252,9 +1374,10 @@ class CleanupApp:
         deletion that is retried until it succeeds; each question defaults to
         the harmless answer, a bare ENTER takes it, and anything but ``yes`` or
         ``no`` re-asks.  Answering no to the dry run only skips it; the deletion
-        still needs its own yes.  A deletion that succeeds makes the table
-        re-query the package, so the view the user returns to is the history
-        that is actually left, not the one the marks were made against.
+        still needs its own yes.  A deletion that succeeds drops the deleted
+        versions from the table and re-queries the package behind them, so the
+        view the user returns to never shows a release they just deleted, even
+        while the index's cache still lists it.
         Credentials scoped with ``4PYPI`` or ``4TEST`` are copied into the base
         variables the tool reads and named above the printed command, so one
         index's password is never offered to the other.  How the authenticator
@@ -1291,7 +1414,7 @@ class CleanupApp:
         finally:
             self.win.resume_curses()
         if deleted:
-            self.reload_after_deletion(deleted)
+            self.reload_after_deletion(versions)
         self.win.render(redraw=True)
 
     def _delete_with_retry(
@@ -1363,21 +1486,62 @@ class CleanupApp:
                 return run_cleanup(command, env)
         return run_cleanup(command, env)
 
-    def reload_after_deletion(self, deleted: int) -> None:
-        """Fetch the package again after a successful deletion.
+    def reload_after_deletion(self, versions: Sequence[str]) -> None:
+        """Hide the deleted versions, then fetch the package again.
 
-        A deletion changes the history, so the table is rebuilt from a fresh
-        query and every trace of the old view -- the marks, the search pattern
-        and the pick -- is dropped, exactly as if the package/host pair had
-        just been entered.  The session ledger keeps the count, so the package
-        list's DELs column reflects what this run actually removed.
+        The versions are hidden before the fetch rather than after it: the
+        deletion is known to have happened, while the fetch is only a second
+        opinion from an index whose CDN may still serve the old history for up
+        to fifteen minutes.  A refetch that lists a deleted version must not put
+        it back on the table, so the hidden set outlives the fetch and the
+        summary line says ``STALE`` until a fetch returns a history without it.
+        Every trace of the old view -- the marks, the search pattern and the
+        pick -- is dropped, exactly as if the package/host pair had just been
+        entered, and the session ledger keeps the count so the package list's
+        DELs column reflects what this run actually removed.
         """
         session = self.package_session(self.cleanup.package)
-        session.deleted += deleted
+        session.deleted += len(versions)
+        # A second deletion while the first is still unconfirmed adds to the
+        # hidden set; replacing it would let the older versions reappear in
+        # the next fetch that still lists them.
+        self.hidden_versions |= set(versions)
+        self.stale = True
         self.search_text = ''
         self.search_re = None
         self.search_anchor = None
         self.load_versions()
+
+    def clear_staleness(self) -> None:
+        """Forget a deletion the index has not acknowledged yet.
+
+        Whether the old table's deletion has propagated says nothing about a
+        different package or index, so a switch drops the hidden versions and
+        the ``STALE`` marker with the table they described.
+        """
+        self.hidden_versions.clear()
+        self.stale = False
+
+    def _settle_hidden_versions(self) -> None:
+        """Keep hidden versions out of a fetched history and note the result.
+
+        A successful fetch is the second opinion on a deletion: a version it no
+        longer lists is settled, so it needs no hiding, while a version it still
+        lists stays hidden and keeps the ``STALE`` marker -- the display never
+        re-adds a release the user already deleted.  With nothing left to hide
+        the history is what the index holds and the marker clears.
+        """
+        if not self.hidden_versions:
+            self.stale = False
+            return
+        fetched = {release.version for release in self.cleanup.versions}
+        self.hidden_versions &= fetched
+        if self.hidden_versions:
+            self.cleanup.versions = [
+                release for release in self.cleanup.versions
+                if release.version not in self.hidden_versions
+            ]
+        self.stale = bool(self.hidden_versions)
 
     def _option_for(self, key: int) -> SimpleNamespace | None:
         """The spinner option bound to *key* on the current screen, if any."""
@@ -1413,11 +1577,16 @@ class CleanupApp:
         """Make *package* the table's package without fetching it.
 
         The package list only offers names it holds, so a name that is not in
-        the list is ignored rather than added behind the user's back.
+        the list is ignored rather than added behind the user's back.  Landing
+        on the package already shown changes nothing, so a stale marker left by
+        a deletion survives it; landing on another package drops the marker with
+        the table the deletion belonged to.
         """
         if package not in self.packages:
             return
         self.package_index = self.packages.index(package)
+        if package != self.cleanup.package:
+            self.clear_staleness()
         self.cleanup.package = package
 
     def remove_package(self, package: str) -> None:
@@ -1488,6 +1657,7 @@ class CleanupApp:
             self.loading = False
             self.win.clear()
         self.cleanup.sort_versions(self.sort)
+        self._settle_hidden_versions()
         # Only a successful fetch makes the package visited: a failed one has
         # no version count, and the package list must not invent a zero.
         self.note_loaded()
@@ -1626,6 +1796,12 @@ class MainScreen(CleanupScreen):
         summary.text(f'User={cleanup_user(cleanup) or "n/a"} ')
         summary.bracket_key('p').text(f'ack={cleanup.package} ')
         summary.bracket_key('h').text(f'ost={cleanup.host_key}')
+        # A deletion the index has not acknowledged yet: the deleted versions
+        # are hidden locally, so the table is honest only if it says so.  The
+        # LABEL role renders bold, which is what sets the one word apart from
+        # the literal values around it.
+        if self.app.stale:
+            summary.label(' STALE')
         win.add_fancy_header(summary)
         # The column titles are the third header line: dim, and deliberately
         # not underlined, so the releases below stay the visually strongest
@@ -1847,16 +2023,35 @@ class MainScreen(CleanupScreen):
         app.stack.push(PACKAGES_ST, app.win.pick_pos)
 
     def refresh_ACTION(self) -> None:
-        """Fetch the current package again, dropping every mark.
+        """Fetch the current package again, carrying the marks onto the new rows.
 
         The table is rebuilt from a fresh query of the same package and index,
-        so a release uploaded since the last fetch joins the list.  Rebuilding
-        discards the old ``Release`` objects, which is what clears the marks:
-        the user's earlier decisions were about rows they saw, not about the
-        history the index now holds.  The pick returns to the top with the new
-        table, exactly as after ``p`` or ``h``.
+        so a release uploaded since the last fetch joins the list.  The marks
+        are collected by version before ``load_versions`` drops the old rows,
+        and every version the refreshed history still lists is marked again:
+        the user decided about a release, not about the row it sat on, so a new
+        upload above it must not undo the choice.  A version the index no longer
+        lists has nothing left to delete and stays gone, and a failed fetch
+        restores nothing because the table is empty either way.  The pick
+        starts over with the new table, exactly as after ``p`` or ``h``.
+
+        A refresh is also how a deletion is confirmed: the fetch settles the
+        hidden versions, and when the last one is gone a brief ``Fresh`` says
+        the table now matches the index instead of leaving the marker's
+        disappearance unexplained.
         """
-        self.app.load_versions()
+        app = self.app
+        was_stale = app.stale
+        marked = {release.version for release in app.cleanup.versions
+                  if release.delete}
+        app.load_versions()
+        if app.load_failed:
+            return
+        for release in app.cleanup.versions:
+            if release.version in marked:
+                release.delete = True
+        if was_stale and not app.stale:
+            app.win.flash('Fresh', duration=2.0)
 
     def package_next_ACTION(self) -> None:
         """Show the next package in the remembered list and reload it.
@@ -1870,6 +2065,9 @@ class MainScreen(CleanupScreen):
             return
         app.package_index = next_index
         app.cleanup.package = app.packages[next_index]
+        # The next package's history says nothing about the old one's
+        # deletion, so the stale marker goes with the table it described.
+        app.clear_staleness()
         app.load_versions()
 
     def host_next_ACTION(self) -> None:
@@ -1879,6 +2077,9 @@ class MainScreen(CleanupScreen):
             HOST_TEST if cleanup.host_key == HOST_PYPI else HOST_PYPI
         )
         self.app.persist(host=cleanup.host_key)
+        # The other index is a different resource: its history cannot confirm
+        # or contradict a deletion made on this one.
+        self.app.clear_staleness()
         self.app.load_versions()
 
 
@@ -1911,15 +2112,22 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
             'run, then asks again before the --do-it deletion; ENTER takes the '
             'safe answer (yes to the dry run, no to the deletion) and only '
             'yes or no are accepted. A failed deletion is offered again behind '
-            'a RETRY: prompt until it succeeds or is declined, and a successful '
-            'one re-queries the package and clears the marks, search and pick '
-            'as if the package had just been opened. The printed command '
-            'describes the run and is not meant to be copied. A read-only run '
-            '(--read-only) never offers d: the hint line reads R/O in its place.',
+            'a RETRY: prompt until it succeeds or is declined. A successful one '
+            'drops the deleted versions from the table at once and re-queries '
+            'the package behind them, clearing the marks, search and pick as if '
+            'the package had just been opened. If the index still lists a '
+            'deleted version (its CDN can lag), the row stays hidden and the '
+            'header says STALE after host= until a fetch no longer lists it. '
+            'The printed command describes the run and is not meant to be '
+            'copied. A read-only run (--read-only) never offers d: the hint '
+            'line reads R/O in its place.',
             'f fetches the current package again without leaving it, so a '
-            'release uploaded since the table was opened appears. The refreshed '
-            'table starts with no marks and the pick starts over; p and h also '
-            'reload, but only after switching package or index.',
+            'release uploaded since the table was opened appears. A version '
+            'the refreshed history still lists keeps its mark and the pick '
+            'starts over; p and h also reload, but they drop the marks with the '
+            'table when they switch package or index. f also settles STALE: a '
+            'deleted version the index no longer lists clears the marker and '
+            'flashes Fresh, while one it still lists keeps it.',
             'The authenticator prompt follows --totp-method. expect, the '
             'default, runs pypi-cleanup through pexpect: answer the password '
             'and device prompts normally, then press Ctrl+] at the '
@@ -1952,6 +2160,8 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
         ``BasicHelpScreen.draw_notes`` wraps each paragraph flush left; a list
         reads better when the marker holds a column of its own and a continued
         line stays under the first line's text rather than under the marker.
+        The wrap never breaks on hyphens, so an option name such as
+        ``--read-only`` stays in one piece for the reader to copy.
         """
         target = win if win is not None else self.app.win
         paragraphs = list(self.extra_help_paragraphs())
@@ -1964,6 +2174,7 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
                 width=width,
                 initial_indent='* ',
                 subsequent_indent='  ',
+                break_on_hyphens=False,
             ):
                 target.add_body(line, attr=curses.A_DIM)
 

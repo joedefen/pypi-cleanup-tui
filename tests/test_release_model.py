@@ -237,6 +237,29 @@ def test_main_requires_a_package(capsys, config_path):
     assert 'at least one package name is required' in capsys.readouterr().err
 
 
+def test_totp_dump_needs_no_package_and_returns_its_status(
+        monkeypatch, config_path):
+    import pypi_cleanup_tui.tui as tui
+
+    monkeypatch.setattr(tui, 'dump_totp_codes', lambda: 1)
+    seen = capture_tui(monkeypatch)
+
+    assert cli.main(['--totp-dump'], config_path=config_path) == 1
+
+    # The dump is a report, not a run: no table opens and no package is stored.
+    assert seen == []
+    assert stored(config_path).vals.packages == ''
+
+
+def test_totp_dump_skips_the_cleanup_tool_check(monkeypatch, config_path):
+    import pypi_cleanup_tui.tui as tui
+
+    monkeypatch.setattr(tui, 'dump_totp_codes', lambda: 0)
+    monkeypatch.setattr(cli, 'cleanup_tool_available', lambda: False)
+
+    assert cli.main(['--totp-dump'], config_path=config_path) == 0
+
+
 def test_main_leaves_the_fetch_to_the_tui(monkeypatch, config_path):
     calls = []
     monkeypatch.setattr(CleanupTui, 'fetch_versions',

@@ -8,7 +8,9 @@ whatever terminal happens to run them.
 from __future__ import annotations
 
 import curses
+import io
 import sys
+import time
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -898,7 +900,7 @@ def test_escape_on_an_untouched_search_leaves_the_table_unfiltered():
         _press(app, 27)
 
         assert app.search_bar.is_active is False
-        assert app.search_text == ''
+        assert app.search_re is None
         assert [release.version for release in app.visible_versions()] == [
             '2.0', '1.1', '1.0']
     finally:
@@ -1160,16 +1162,17 @@ def test_run_tui_loads_the_history_after_it_opens(monkeypatch):
     assert calls == ['demo']
 
 
-def test_f_refreshes_the_current_package_and_clears_the_marks(monkeypatch):
+def test_f_refreshes_the_current_package_and_keeps_the_marks_that_remain(
+        monkeypatch):
     cleanup = _cleanup3()
-    for release in cleanup.versions:
-        release.delete = True
+    cleanup.versions[0].delete = True   # 2.0 is still on the index
+    cleanup.versions[2].delete = True   # 1.0 is gone from the new history
     app = _app(cleanup)
     fetched = []
 
     def fake_fetch(self):
-        fetched.append(self.package)
-        self.versions = [Release('3.0', NOW)]
+        fetched.append((self.package, self.host_key))
+        self.versions = [Release('3.0', NOW), Release('2.0', NOW)]
         return self.versions
 
     monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
@@ -1177,9 +1180,111 @@ def test_f_refreshes_the_current_package_and_clears_the_marks(monkeypatch):
         _draw(app)
         _press(app, ord('f'))
 
-        assert fetched == ['demo']
-        assert [release.version for release in app.cleanup.versions] == ['3.0']
-        assert not any(release.delete for release in app.cleanup.versions)
+        assert fetched == [('demo', 'pypi')]
+        assert [release.version for release in app.cleanup.versions] == [
+            '3.0', '2.0']
+        # The mark follows the version, not the row: 2.0 keeps its mark even
+        # though the new upload moved it down, and the vanished 1.0 takes its
+        # mark with it.
+        assert [release.delete for release in app.cleanup.versions] == [
+            False, True]
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_failed_refresh_restores_no_marks(monkeypatch):
+    cleanup = _cleanup3()
+    cleanup.versions[0].delete = True
+    app = _app(cleanup)
+
+    def broken(self):
+        raise LookupError("package 'demo' was not found on pypi.org")
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', broken)
+    monkeypatch.setattr(app.win, 'alert', lambda message, title='ALERT': None)
+    try:
+        _draw(app)
+        _press(app, ord('f'))
+
+        assert app.load_failed is True
+        assert app.cleanup.versions == []
+    finally:
+        app.win.stop_curses()
+
+
+def test_f_clears_the_stale_marker_and_says_fresh_when_the_index_catches_up(
+        monkeypatch):
+    app = _app(_cleanup())
+    app.hidden_versions = {'2.0'}
+    app.stale = True
+    flashed = []
+
+    def fake_fetch(self):
+        self.versions = [Release('1.0', NOW - timedelta(days=10))]
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    monkeypatch.setattr(
+        app.win, 'flash',
+        lambda message='', duration=2.0: flashed.append(message))
+    try:
+        _press(app, ord('f'))
+
+        # The index no longer lists 2.0, so the deletion is confirmed: nothing
+        # stays hidden, the marker clears, and the flash says why it went.
+        assert app.hidden_versions == set()
+        assert app.stale is False
+        assert flashed == ['Fresh']
+    finally:
+        app.win.stop_curses()
+
+
+def test_f_keeps_the_stale_marker_while_the_index_still_lists_the_version(
+        monkeypatch):
+    app = _app(_cleanup())
+    app.hidden_versions = {'2.0'}
+    app.stale = True
+    flashed = []
+
+    def fake_fetch(self):
+        self.versions = [Release('2.0', NOW),
+                         Release('1.0', NOW - timedelta(days=10))]
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    monkeypatch.setattr(
+        app.win, 'flash',
+        lambda message='', duration=2.0: flashed.append(message))
+    try:
+        _press(app, ord('f'))
+
+        # The deleted version is still listed, so it stays out of the table and
+        # the marker stays on: nothing has been confirmed yet.
+        assert [release.version for release in app.cleanup.versions] == ['1.0']
+        assert app.hidden_versions == {'2.0'}
+        assert app.stale is True
+        assert flashed == []
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_failed_refetch_after_a_deletion_keeps_the_marker(monkeypatch):
+    app = _app(_cleanup())
+    app.hidden_versions = {'2.0'}
+    app.stale = True
+
+    def broken(self):
+        raise LookupError('the index is unreachable')
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', broken)
+    monkeypatch.setattr(app.win, 'alert', lambda *args, **kwargs: None)
+    try:
+        _press(app, ord('f'))
+
+        # A fetch that never answered cannot confirm the deletion, so the
+        # marker and the hidden version stay where they were.
+        assert app.stale is True
+        assert app.hidden_versions == {'2.0'}
     finally:
         app.win.stop_curses()
 
@@ -1203,6 +1308,24 @@ def test_p_rotates_the_packages_and_reloads(monkeypatch):
         _press(app, ord('p'))
         assert app.cleanup.package == 'a'
         assert fetched == ['b', 'a']
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_package_switch_clears_the_stale_marker(monkeypatch):
+    app = _app(CleanupTui('a', user='alice'), packages=['a', 'b'])
+    app.hidden_versions = {'0.9'}
+    app.stale = True
+    monkeypatch.setattr(CleanupTui, 'fetch_versions',
+                        lambda self: [Release('1.0', NOW)])
+    try:
+        _press(app, ord('p'))
+
+        # The other package's history cannot confirm a deletion made on this
+        # one, so the marker goes with the table it described.
+        assert app.cleanup.package == 'b'
+        assert app.hidden_versions == set()
+        assert app.stale is False
     finally:
         app.win.stop_curses()
 
@@ -1242,6 +1365,21 @@ def test_h_switches_the_index_and_reloads(tmp_path, monkeypatch):
         assert app.cleanup.host_key == tui_mod.HOST_PYPI
         assert fetched == [tui_mod.HOST_TEST, tui_mod.HOST_PYPI]
         assert ini.vals.host == tui_mod.HOST_PYPI
+    finally:
+        app.win.stop_curses()
+
+
+def test_an_index_switch_clears_the_stale_marker(monkeypatch):
+    app = _app(CleanupTui('demo', user='alice'))
+    app.hidden_versions = {'0.9'}
+    app.stale = True
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
+    try:
+        _press(app, ord('h'))
+
+        assert app.cleanup.host_key == tui_mod.HOST_TEST
+        assert app.hidden_versions == set()
+        assert app.stale is False
     finally:
         app.win.stop_curses()
 
@@ -1699,6 +1837,89 @@ def test_a_bad_totp_secret_is_reported_not_raised(capsys):
 
     out = capsys.readouterr().out
     assert 'warning: could not compute a TOTP code' in out
+
+
+def test_each_index_uses_its_scoped_secret_then_the_unscoped_one():
+    environ = {
+        'PYPI_CLEANUP_TOTP_SECRET': 'base-secret',
+        'PYPI_CLEANUP_TOTP_SECRET4PYPI': 'pypi-secret',
+        'PYPI_CLEANUP_TOTP_SECRET4TEST': '',
+    }
+
+    assert tui_mod.totp_dump_rows(environ) == [
+        (HOST_PYPI, 'pypi-secret'),
+        (HOST_TEST, 'base-secret'),
+    ]
+
+
+def test_an_index_without_any_secret_is_left_out_of_the_dump():
+    environ = {'PYPI_CLEANUP_TOTP_SECRET4TEST': 'test-secret'}
+
+    assert tui_mod.totp_dump_rows(environ) == [(HOST_TEST, 'test-secret')]
+
+
+def test_a_dump_line_puts_the_indexes_side_by_side(monkeypatch):
+    monkeypatch.setattr(tui_mod.totp, 'code_and_remaining',
+                        lambda secret, moment: ('287082', 24))
+
+    line = tui_mod.format_totp_line(
+        59, [(HOST_PYPI, TOTP_SECRET), (HOST_TEST, TOTP_SECRET)])
+
+    clock = time.strftime('%H:%M:%S', time.localtime(59))
+    assert line == f'{clock}  pypi: 287082 24s    test: 287082 24s'
+
+
+def test_a_bad_secret_is_reported_in_its_own_group():
+    line = tui_mod.format_totp_line(59, [(HOST_PYPI, 'not base 32!')])
+
+    assert 'pypi: could not compute a TOTP code' in line
+
+
+def test_the_dump_repeats_every_three_seconds_until_ctrl_c(monkeypatch):
+    other_secret = 'MZXW6YTBOI======'
+    codes = {TOTP_SECRET: ('287082', 30), other_secret: ('111111', 18)}
+    monkeypatch.setattr(tui_mod.totp, 'code_and_remaining',
+                        lambda secret, moment: codes[secret])
+    moments = iter([0.0, 3.0])
+    slept = []
+    out = io.StringIO()
+
+    def sleep(seconds):
+        slept.append(seconds)
+        if len(slept) == 2:
+            raise KeyboardInterrupt
+
+    status = tui_mod.dump_totp_codes(
+        {'PYPI_CLEANUP_TOTP_SECRET4PYPI': TOTP_SECRET,
+         'PYPI_CLEANUP_TOTP_SECRET4TEST': other_secret},
+        clock=lambda: next(moments),
+        sleep=sleep,
+        out=out,
+    )
+
+    assert status == 0
+    assert slept == [3.0, 3.0]
+    lines = out.getvalue().splitlines()
+    # One line per refresh, each led by its clock, both hosts on it.
+    assert len(lines) == 2
+    assert lines[0][:8] == time.strftime('%H:%M:%S', time.localtime(0.0))
+    assert lines[1][:8] == time.strftime('%H:%M:%S', time.localtime(3.0))
+    assert 'pypi: 287082 30s' in lines[0]
+    assert 'test: 111111 18s' in lines[0]
+    # The second host starts in the same column on both blocks.
+    assert lines[0].index('test') == lines[1].index('test')
+
+
+def test_the_dump_says_so_when_no_secret_is_set(capsys):
+    def never(_seconds):  # pragma: no cover - the loop must not start
+        raise AssertionError('the dump must not loop without a secret')
+
+    assert tui_mod.dump_totp_codes({}, sleep=never) == 1
+
+    err = capsys.readouterr().err
+    assert 'no TOTP secrets are set' in err
+    assert 'PYPI_CLEANUP_TOTP_SECRET4PYPI' in err
+    assert 'PYPI_CLEANUP_TOTP_SECRET4TEST' in err
 
 
 def test_the_display_names_the_credentials_it_will_map():
@@ -2428,6 +2649,47 @@ def test_a_successful_deletion_reloads_and_clears_the_view(monkeypatch):
         assert app.win.pick_pos == 0
         session = app.session['demo']
         assert (session.deleted, session.versions) == (1, 2)
+        # The fetch no longer lists 2.0, so the index has caught up: nothing is
+        # hidden and the summary line has no marker.
+        assert app.hidden_versions == set()
+        assert app.stale is False
+        assert app.win.head.texts[1] == 'User=alice pack=demo host=pypi'
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_deleted_version_the_index_still_lists_stays_hidden_and_says_stale(
+        monkeypatch):
+    cleanup = _cleanup()
+    cleanup.versions[0].delete = True
+    app = _app(cleanup)
+    # The CDN is still serving the old history, so the fetch lists 2.0 again.
+    cached = [Release('2.0', NOW), Release('1.0', NOW - timedelta(days=10))]
+
+    def fake_fetch(self):
+        self.versions = list(cached)
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no', lambda question, default: True)
+        monkeypatch.setattr(tui_mod, 'run_cleanup', lambda command, env=None: 0)
+
+        app.hand_off_to_cleanup(['2.0'])
+        _draw(app)
+
+        # The version this run deleted never returns to the table, even though
+        # the index still reports it, and the header says the table is behind.
+        assert [release.version for release in cleanup.versions] == ['1.0']
+        assert app.hidden_versions == {'2.0'}
+        assert app.stale is True
+        assert app.win.head.texts[1] == 'User=alice pack=demo host=pypi STALE'
+        # One bold word after the host: the LABEL role is what renders bold.
+        runs = app.win.head.text_attrs[1]
+        assert (curses.A_BOLD, len(' STALE')) in runs
     finally:
         app.win.stop_curses()
 
