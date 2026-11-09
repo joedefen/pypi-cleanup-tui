@@ -71,6 +71,13 @@ history is what the user sees when the final ENTER brings the table back.  A
 ``--read-only`` run never offers ``d``: the hint block reads ``R/O`` instead,
 always.
 
+``f`` fetches the current package's history again without leaving the package,
+which is how a release uploaded since the table was opened shows up.  The
+refreshed table starts with no marks, so the deletion decisions made before the
+fetch are not silently carried onto rows the user has not seen, and the pick
+starts over with the new table.  The keys ``p`` and ``h`` reload the table too,
+but they first change which package or index is queried.
+
 ``g`` is the stability filter, and it means something different on each screen:
 on the help screen it rotates the gap -- 3, 7, 14, 30 or 60 days -- and on the
 table it applies that gap, unmarking every marked release that no other release
@@ -1056,6 +1063,10 @@ class CleanupApp:
                      keys=[ord('p')], scope={MAIN_ST})
         spin.add_key('host_next', 'h - switch index', genre='action',
                      keys=[ord('h')], scope={MAIN_ST})
+        # f reloads the package already on screen, which is how a new upload
+        # is picked up without rotating to another package first.
+        spin.add_key('refresh', 'f - refresh the release list', genre='action',
+                     keys=[ord('f')], scope={MAIN_ST})
         # ESC is the way back on every pushed screen, but it is the way
         # forward on the package list: there it opens the picked package
         # before returning, which is why one binding is enough -- each screen
@@ -1584,13 +1595,15 @@ class MainScreen(CleanupScreen):
             hints.bracket_key('x').text(':mark ')
             hints.bracket_key('X').text(f':mark{DOWN_MARK} ')
         # Where the label starts with the key itself, the bracket form merges
-        # into one word with the key underlined ("sort", "zone", "quit").  The
-        # from-here-down keys trade "-all" for the arrow glyph.
+        # into one word with the key underlined ("sort", "zone", "fresh",
+        # "quit").  The from-here-down keys trade "-all" for the arrow glyph.
         hints.bracket_key('s').text('ort ')
         hints.bracket_key('z').text('one ')
         # The gap in force, because g applies it right here.  The number is
         # padded so a one-digit gap does not move the keys to its right.
         hints.bracket_key('g').text(f'ap{self._gap_days():<{GAP_HINT_WIDTH}} ')
+        # f sits just before q: a reload is the last thing to do before leaving.
+        hints.bracket_key('f').text('resh ')
         hints.bracket_key('q').text('uit ')
         hints.bracket_key('?').text(':help')
         # The search field is always present, even with an empty pattern; the
@@ -1833,6 +1846,18 @@ class MainScreen(CleanupScreen):
         app.packages_pick = app.next_package_index()
         app.stack.push(PACKAGES_ST, app.win.pick_pos)
 
+    def refresh_ACTION(self) -> None:
+        """Fetch the current package again, dropping every mark.
+
+        The table is rebuilt from a fresh query of the same package and index,
+        so a release uploaded since the last fetch joins the list.  Rebuilding
+        discards the old ``Release`` objects, which is what clears the marks:
+        the user's earlier decisions were about rows they saw, not about the
+        history the index now holds.  The pick returns to the top with the new
+        table, exactly as after ``p`` or ``h``.
+        """
+        self.app.load_versions()
+
     def package_next_ACTION(self) -> None:
         """Show the next package in the remembered list and reload it.
 
@@ -1891,6 +1916,10 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
             'as if the package had just been opened. The printed command '
             'describes the run and is not meant to be copied. A read-only run '
             '(--read-only) never offers d: the hint line reads R/O in its place.',
+            'f fetches the current package again without leaving it, so a '
+            'release uploaded since the table was opened appears. The refreshed '
+            'table starts with no marks and the pick starts over; p and h also '
+            'reload, but only after switching package or index.',
             'The authenticator prompt follows --totp-method. expect, the '
             'default, runs pypi-cleanup through pexpect: answer the password '
             'and device prompts normally, then press Ctrl+] at the '

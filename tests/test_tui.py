@@ -257,7 +257,7 @@ def test_main_screen_draws_three_header_lines_and_one_row_per_release():
         # the pick is on an unmarked row, so the marking pair is offered.
         assert app.win.head.texts[0] == (
             f'    x:mark X:mark{tui_mod.DOWN_MARK} '
-            f'sort zone gap30 quit ?:help /')
+            f'sort zone gap30 fresh quit ?:help /')
         # The summary is a fancy header: [p] and [h] are key styled, User is
         # literal.  It is not dimmed, unlike the hint and column lines.
         assert app.win.head.texts[1] == 'User=alice pack=demo host=pypi'
@@ -391,9 +391,20 @@ def test_the_hint_line_keeps_its_shape_as_the_pick_changes_state():
 
         # The words swap, but the blocks keep their width: the keys to the
         # right stay in the same columns.
-        assert unmarked.endswith('sort zone gap30 quit ?:help /')
-        assert marked.endswith('sort zone gap30 quit ?:help /')
+        assert unmarked.endswith('sort zone gap30 fresh quit ?:help /')
+        assert marked.endswith('sort zone gap30 fresh quit ?:help /')
         assert len(unmarked) == len(marked)
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_hint_line_offers_refresh_before_quit():
+    app = _app()
+    try:
+        _draw(app)
+
+        line = app.win.head.texts[0]
+        assert line.index('fresh') < line.index('quit')
     finally:
         app.win.stop_curses()
 
@@ -1147,6 +1158,30 @@ def test_run_tui_loads_the_history_after_it_opens(monkeypatch):
 
     assert tui_mod.run_tui(_cleanup(), backend=backend, singleton=False) == 0
     assert calls == ['demo']
+
+
+def test_f_refreshes_the_current_package_and_clears_the_marks(monkeypatch):
+    cleanup = _cleanup3()
+    for release in cleanup.versions:
+        release.delete = True
+    app = _app(cleanup)
+    fetched = []
+
+    def fake_fetch(self):
+        fetched.append(self.package)
+        self.versions = [Release('3.0', NOW)]
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fake_fetch)
+    try:
+        _draw(app)
+        _press(app, ord('f'))
+
+        assert fetched == ['demo']
+        assert [release.version for release in app.cleanup.versions] == ['3.0']
+        assert not any(release.delete for release in app.cleanup.versions)
+    finally:
+        app.win.stop_curses()
 
 
 def test_p_rotates_the_packages_and_reloads(monkeypatch):
@@ -2586,7 +2621,7 @@ def test_the_hint_line_shows_the_gap_in_force():
         _draw(app)
         # The block keeps its width across one- and two-digit gaps, so the
         # keys to its right stay in the same columns.
-        assert app.win.head.texts[0].endswith('gap7  quit ?:help /')
+        assert app.win.head.texts[0].endswith('gap7  fresh quit ?:help /')
     finally:
         app.win.stop_curses()
 
@@ -2871,6 +2906,7 @@ def test_help_screen_lists_the_selection_and_zone_keys():
                      'u - unmark this release', 'U - unmark this release',
                      'z - date time zone', 's - change the sort order',
                      'p - next package', 'h - switch index', 'P - package list',
+                     'f - refresh the release list',
                      'T - themes', '/ - incremental search',
                      'x - remove from the package list [Package Screen]',
                      'ESC - back, or open the picked package',

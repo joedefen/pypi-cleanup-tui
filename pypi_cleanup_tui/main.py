@@ -104,6 +104,15 @@ DEFAULT_TOTP_METHOD = TOTP_EXPECT
 #: Seconds to wait for the PyPI JSON API.
 REQUEST_TIMEOUT = 30.0
 
+#: Headers sent with every JSON API request.  The cache directives keep the
+#: release list from coming back stale: a just-uploaded or just-deleted release
+#: must show up as soon as the table refreshes.
+REQUEST_HEADERS = {
+    "Accept": "application/json",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
+
 #: Every stored option, with the value used before anything has been saved.
 #: ``packages`` is held the same way the command line accepts it: one comma
 #: separated list.
@@ -211,7 +220,7 @@ class CleanupTui:
         response = requests.get(
             url,
             timeout=REQUEST_TIMEOUT,
-            headers={"Accept": "application/json"},
+            headers=REQUEST_HEADERS,
         )
         if response.status_code == 404:
             raise LookupError(

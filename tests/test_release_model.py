@@ -154,6 +154,22 @@ def test_fetch_versions_skips_empty_releases_and_uses_the_oldest_file(monkeypatc
     assert releases['0.8'] == datetime(2024, 4, 1, 0, 0, tzinfo=UTC)
 
 
+def test_fetch_versions_asks_the_server_not_to_cache(monkeypatch):
+    seen = {}
+
+    def fake_get(url, **kwargs):
+        seen.update(kwargs)
+        return FakeResponse({'releases': {}})
+
+    monkeypatch.setattr(cli.requests, 'get', fake_get)
+
+    CleanupTui('demo').fetch_versions()
+
+    headers = seen['headers']
+    assert headers['Cache-Control'] == 'no-cache'
+    assert headers['Pragma'] == 'no-cache'
+
+
 def test_fetch_versions_names_the_missing_package(monkeypatch):
     monkeypatch.setattr(cli.requests, 'get',
                         lambda url, **kwargs: FakeResponse({}, status_code=404))

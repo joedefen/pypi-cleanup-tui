@@ -69,6 +69,7 @@ The first name is the package the table opens; the rest is kept for `p` and for 
 | `p` | show the next package in the list and reload |
 | `P` | open the package list |
 | `h` | switch between pypi.org and test.pypi.org and reload |
+| `f` | fetch the current package again and clear the marks |
 | `x` | mark the picked release for deletion, then step down |
 | `X` | mark the picked release and every release below it, then step up (unmarked row only) |
 | `u` | unmark the picked release, then step down |
@@ -85,12 +86,12 @@ Marked releases take `✘` in `DEL` and dim their other cells, while the release
 The column titles are a dim third line, the sorted column carries a `*` (`*VERSION`, or `*DATE (UTC)` after `s`), and the `DATE` title names the zone in force (`DATE (EDT)` after `z`). The keys on the first line are blocks, and a block that does not apply is blanked rather than removed, so nothing to its right moves:
 
 ```text
-x:mark X:mark▼ sort zone gap30 quit ?:help /     nothing marked, unmarked row
-del unmark Unmark▼ sort zone gap30 quit ?:help /     marked, pick on a marked row
-R/O unmark Unmark▼ sort zone gap30 quit ?:help /     read-only, d never offered
+x:mark X:mark▼ sort zone gap30 fresh quit ?:help /     nothing marked, unmarked row
+del unmark Unmark▼ sort zone gap30 fresh quit ?:help /     marked, pick on a marked row
+R/O unmark Unmark▼ sort zone gap30 fresh quit ?:help /     read-only, d never offered
 ```
 
-An unmarked row offers `x`/`X` and a marked row offers `u`/`U`, the two pairs have the same width, and the row under the pick chooses between them. `del` leads once something is marked and no pattern is filtering -- a filter can hide marked releases, so `d` is inert while one is in force. `--read-only` fills that block with `R/O` and never offers `d`. The search field is the one block whose width follows its text, and the theme key is listed on the help screen only.
+An unmarked row offers `x`/`X` and a marked row offers `u`/`U`, the two pairs have the same width, and the row under the pick chooses between them. `del` leads once something is marked and no pattern is filtering -- a filter can hide marked releases, so `d` is inert while one is in force. `--read-only` fills that block with `R/O` and never offers `d`. The search field is the one block whose width follows its text, and the theme key is listed on the help screen only. `f` reloads the package already on screen, dropping every mark, so a release uploaded since the last fetch appears.
 
 ### Search and the stability gap
 
