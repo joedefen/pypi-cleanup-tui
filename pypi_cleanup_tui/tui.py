@@ -207,6 +207,10 @@ COMMAND_INDENT = '   '
 CREDENTIAL_ENV_VARS = ('PYPI_CLEANUP_PASSWORD', 'PYPI_CLEANUP_TOTP_SECRET')
 CREDENTIAL_SUFFIXES = {HOST_PYPI: '4PYPI', HOST_TEST: '4TEST'}
 
+#: The variable that names the account for one index.  Its scoped form wins
+#: over ``-u``, because a flag cannot be scoped to the index in use.
+USER_ENV_VAR = 'PYPI_CLEANUP_USER'
+
 #: The two questions asked between the runs.  The dry run defaults to yes
 #: because it only reports; the destructive run defaults to no.
 DRY_RUN_PROMPT = 'Dry-run [Yes OR no]?'
@@ -261,12 +265,35 @@ def cleanup_command(
         command.append(mode)
     command += [
         '-y',
-        '-u', cleanup.user or os.environ.get('USER', ''),
+        '-u', cleanup_user(cleanup),
         '-t', cleanup.host_url,
         '-p', cleanup.package,
         '-r', pattern,
     ]
     return command
+
+
+def scoped_user(host: str,
+                environ: Mapping[str, str] | None = None) -> str:
+    """The account ``PYPI_CLEANUP_USER4...`` names for *host*, or ``''``."""
+    env = os.environ if environ is None else environ
+    suffix = CREDENTIAL_SUFFIXES.get(host)
+    return env.get(USER_ENV_VAR + suffix, '') if suffix else ''
+
+
+def cleanup_user(cleanup: CleanupTui,
+                 environ: Mapping[str, str] | None = None) -> str:
+    """The account ``pypi-cleanup`` should act as.
+
+    ``PYPI_CLEANUP_USER4PYPI`` and ``PYPI_CLEANUP_USER4TEST`` name the account
+    for one index and win over ``-u``: the flag cannot be scoped, so a single
+    run that switches index would otherwise carry one name to both.  With the
+    host's variable unset or empty, ``-u`` wins and the login name is last.
+    """
+    env = os.environ if environ is None else environ
+    return (scoped_user(cleanup.host_key, env)
+            or cleanup.user
+            or env.get('USER', ''))
 
 
 def credential_env(host: str,
@@ -1348,7 +1375,7 @@ class MainScreen(CleanupScreen):
         # (``pypi`` or ``test``), not its domain name.
         cleanup = self.app.cleanup
         summary = HeaderLine()
-        summary.text(f'User={cleanup.user or "n/a"} ')
+        summary.text(f'User={cleanup_user(cleanup) or "n/a"} ')
         summary.bracket_key('p').text(f'ack={cleanup.package} ')
         summary.bracket_key('h').text(f'ost={cleanup.host_key}')
         win.add_fancy_header(summary)

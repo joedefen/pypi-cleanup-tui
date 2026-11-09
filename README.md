@@ -77,7 +77,7 @@ The first name is the package the table opens; the rest is kept for `p` and for 
 | `d` | leave the table, run a `pypi-cleanup` dry run, then the deletion after a second confirmation |
 | `g` | apply the stability gap on the table; on the help screen, rotate the gap instead |
 
-The second header line is the run: `User=...`, `[p]ack=...` and `[h]ost=...`. `User` shows `n/a` until `-u` is given, `host` shows the index key (`pypi` or `test`) rather than a domain, and `p` and `h` each reload the table. The body then loads: `Loading ...` first, releases after; a failed load opens a modal with the error and leaves the body empty for another package or index.
+The second header line is the run: `User=...`, `[p]ack=...` and `[h]ost=...`. `User` shows the account `pypi-cleanup` will act as -- the index's `$PYPI_CLEANUP_USER4...`, else `-u`, else your login name, with `n/a` only when none is known -- `host` shows the index key (`pypi` or `test`) rather than a domain, and `p` and `h` each reload the table. The body then loads: `Loading ...` first, releases after; a failed load opens a modal with the error and leaves the body empty for another package or index.
 
 Marked releases take `✘` in `DEL` and dim their other cells, while the releases that will be kept stay in the success color, so both halves of the decision are visible at once. `T` lists the palettes with swatches; its last entry, `mono`, is not a palette but the switch that turns color off, exactly like `--no-color` and the `NO_COLOR` convention, and choosing a palette turns it back on.
 
@@ -121,7 +121,7 @@ Pressing `d` leaves the table for the bare terminal, where it shows the `pypi-cl
 > * Read the tool's documentation at <https://pypi.org/project/pypi-cleanup/>.
 > * Set `$PYPI_CLEANUP_PASSWORD` to your account's login password to skip its password prompt.
 > * Set `$PYPI_CLEANUP_TOTP_SECRET` to skip the prompt for your 6-digit authenticator value on every run.
-> * Scope either value to one index with a `4PYPI` or `4TEST` suffix -- `$PYPI_CLEANUP_PASSWORD4TEST`, `$PYPI_CLEANUP_TOTP_SECRET4PYPI` -- and the TUI passes it as the base variable only when that index is in use. Each base variable is left untouched when its suffix form is unset,
+> * Scope either value to one index with a `4PYPI` or `4TEST` suffix -- `$PYPI_CLEANUP_PASSWORD4TEST`, `$PYPI_CLEANUP_TOTP_SECRET4PYPI` -- and the TUI passes it as the base variable only when that index is in use. Each base variable is left untouched when its suffix form is unset. `$PYPI_CLEANUP_USER4PYPI` and `$PYPI_CLEANUP_USER4TEST` work the same way for the account: on that index they override `-u`.
 > * **The machine running this TUI must be "trusted".** If `pypi-cleanup` fails with an authentication or unrecognized device error, log into pypi.org and test.pypi.org using a browser on this same machine, and click the resulting verification link in the email from that same browser.
 
 ### Options are remembered

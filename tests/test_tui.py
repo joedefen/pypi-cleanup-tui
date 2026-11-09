@@ -54,7 +54,7 @@ def _restore_appearance():
 @pytest.fixture(autouse=True)
 def _no_scoped_credentials(monkeypatch):
     """A developer's own 4PYPI/4TEST credentials must not reach these tests."""
-    for base in tui_mod.CREDENTIAL_ENV_VARS:
+    for base in (*tui_mod.CREDENTIAL_ENV_VARS, tui_mod.USER_ENV_VAR):
         for suffix in tui_mod.CREDENTIAL_SUFFIXES.values():
             monkeypatch.delenv(base + suffix, raising=False)
 
@@ -272,12 +272,36 @@ def test_main_screen_draws_three_header_lines_and_one_row_per_release():
         app.win.stop_curses()
 
 
-def test_the_summary_line_shows_n_a_without_a_user():
+def test_the_summary_line_shows_n_a_without_a_user(monkeypatch):
+    monkeypatch.delenv('USER', raising=False)
     app = _app(CleanupTui('demo'))
     try:
         _draw(app)
 
         assert app.win.head.texts[1] == 'User=n/a pack=demo host=pypi'
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_summary_line_names_the_login_name_as_the_effective_user(monkeypatch):
+    monkeypatch.setenv('USER', 'login')
+    app = _app(CleanupTui('demo'))
+    try:
+        _draw(app)
+
+        # -u will carry the login name, so the header shows it too.
+        assert app.win.head.texts[1] == 'User=login pack=demo host=pypi'
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_summary_line_names_the_scoped_user(monkeypatch):
+    monkeypatch.setenv('PYPI_CLEANUP_USER4TEST', 'test-bot')
+    app = _app(CleanupTui('demo', host=HOST_TEST))
+    try:
+        _draw(app)
+
+        assert app.win.head.texts[1] == 'User=test-bot pack=demo host=test'
     finally:
         app.win.stop_curses()
 
@@ -1480,6 +1504,38 @@ def test_the_cleanup_command_falls_back_to_the_login_name(monkeypatch):
     command = tui_mod.cleanup_command(CleanupTui('demo'), ['1.0'])
 
     assert command[command.index('-u') + 1] == 'login'
+
+
+def test_the_hosts_scoped_user_wins_over_the_flag(monkeypatch):
+    monkeypatch.setenv('PYPI_CLEANUP_USER4PYPI', 'pypi-bot')
+    monkeypatch.setenv('PYPI_CLEANUP_USER4TEST', 'test-bot')
+
+    def user_for(host):
+        command = tui_mod.cleanup_command(
+            CleanupTui('demo', user='flag', host=host), ['1.0'])
+        return command[command.index('-u') + 1]
+
+    assert user_for(HOST_PYPI) == 'pypi-bot'
+    assert user_for(HOST_TEST) == 'test-bot'
+
+
+def test_a_scoped_user_wins_over_the_login_name(monkeypatch):
+    monkeypatch.setenv('USER', 'login')
+    monkeypatch.setenv('PYPI_CLEANUP_USER4PYPI', 'pypi-bot')
+
+    command = tui_mod.cleanup_command(CleanupTui('demo'), ['1.0'])
+
+    assert command[command.index('-u') + 1] == 'pypi-bot'
+
+
+def test_an_empty_scoped_user_leaves_the_flag_in_charge(monkeypatch):
+    monkeypatch.setenv('USER', 'login')
+    monkeypatch.setenv('PYPI_CLEANUP_USER4TEST', '')
+
+    command = tui_mod.cleanup_command(
+        CleanupTui('demo', user='flag', host=HOST_TEST), ['1.0'])
+
+    assert command[command.index('-u') + 1] == 'flag'
 
 
 def test_credential_env_maps_only_the_hosts_non_empty_variables():
