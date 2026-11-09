@@ -930,7 +930,26 @@ def test_t_opens_the_theme_screen_and_esc_returns():
         app.win.stop_curses()
 
 
-def test_t_cycles_only_on_the_theme_screen():
+def test_T_opens_the_theme_screen_from_the_help_screen():
+    app = _app()
+    try:
+        app.opts.help_screen = True
+        app.stack.perform_actions(app.spin)
+        assert app.stack.curr.num == tui_mod.HELP_ST
+
+        _press(app, ord('T'))
+        assert app.stack.curr.num == tui_mod.THEME_ST
+
+        # ESC walks back down the stack: theme, then help, then the table.
+        _press(app, 27)
+        assert app.stack.curr.num == tui_mod.HELP_ST
+        _press(app, 27)
+        assert app.stack.curr.num == tui_mod.MAIN_ST
+    finally:
+        app.win.stop_curses()
+
+
+def test_t_cycles_on_the_theme_and_help_screens():
     app = _app()
     try:
         starting = app.opts.theme
@@ -943,6 +962,16 @@ def test_t_cycles_only_on_the_theme_screen():
         _press(app, ord('t'))
         assert app.opts.theme != starting
         assert app.stack.curr.num == tui_mod.THEME_ST
+
+        _press(app, 27)
+        assert app.stack.curr.num == tui_mod.MAIN_ST
+
+        app.opts.help_screen = True
+        app.stack.perform_actions(app.spin)
+        previous = app.opts.theme
+        _press(app, ord('t'))
+        assert app.opts.theme != previous
+        assert app.stack.curr.num == tui_mod.HELP_ST
     finally:
         app.win.stop_curses()
 
@@ -2790,16 +2819,33 @@ def test_an_unknown_starting_zone_falls_back_to_utc():
         app.win.stop_curses()
 
 
+def test_z_cycles_the_zone_on_the_help_screen(tmp_path):
+    ini = _ini(tmp_path)
+    app = _app(ini=ini)
+    try:
+        app.opts.help_screen = True
+        app.stack.perform_actions(app.spin)
+
+        _press(app, ord('z'))
+
+        assert app.stack.curr.num == tui_mod.HELP_ST
+        assert app.spin.get_value('time_zone') == tui_mod.LOCAL_MODE
+        assert ini.vals.zone == tui_mod.LOCAL_MODE
+    finally:
+        app.win.stop_curses()
+
+
 def test_a_key_bound_to_another_screen_stores_nothing(tmp_path):
     ini = _ini(tmp_path)
     app = _app(ini=ini)
     try:
         app.opts.help_screen = True
         app.stack.perform_actions(app.spin)
-        _press(app, ord('z'))
+        _press(app, ord('s'))
 
         assert app.stack.curr.num == tui_mod.HELP_ST
-        assert ini.vals.zone == tui_mod.UTC_MODE
+        assert app.sort == SORT_BY_VERSION
+        assert ini.vals.sort == SORT_BY_VERSION
     finally:
         app.win.stop_curses()
 

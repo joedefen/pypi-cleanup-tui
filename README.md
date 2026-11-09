@@ -64,8 +64,8 @@ The first name is the package the table opens; the rest is kept for `p` and for 
 | `q` | quit |
 | `?` | open the help screen; `ESC` returns to the screen that opened it |
 | `/` | open the incremental search; `ENTER` closes it, `ESC` restores the pattern |
-| `T` | open the THEMES screen; `ESC` returns to the table |
-| `t` | cycle the color theme (THEMES screen only; `mono` turns color off) |
+| `T` | open the THEMES screen (also from the help screen); `ESC` returns to the screen that opened it |
+| `t` | cycle the color theme (THEMES and help screens; `mono` turns color off) |
 | `p` | show the next package in the list and reload |
 | `P` | open the package list |
 | `h` | switch between pypi.org and test.pypi.org and reload |
@@ -73,7 +73,7 @@ The first name is the package the table opens; the rest is kept for `p` and for 
 | `X` | mark the picked release and every release below it, then step up (unmarked row only) |
 | `u` | unmark the picked release, then step down |
 | `U` | unmark the picked release and every release below it, then step up (marked row only) |
-| `z` | switch the `DATE` column between UTC and the local time zone |
+| `z` | switch the `DATE` column between UTC and the local time zone (also on the help screen) |
 | `s` | change the sort order |
 | `d` | leave the table, run a `pypi-cleanup` dry run, then the deletion after a second confirmation |
 | `g` | apply the stability gap on the table; on the help screen, rotate the gap instead |

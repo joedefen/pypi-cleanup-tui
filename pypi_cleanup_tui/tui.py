@@ -33,11 +33,12 @@ one offers ``u``/``U`` instead -- and ``X`` and ``U`` are inert against a row
 already in the state they would produce.
 
 ``z`` cycles the time zone used by the ``DATE`` column between UTC and the
-machine's local zone; the ``DATE`` title names the zone in force.  ``s`` flips
-the table between version order and upload-date order, and the sorted column
-carries a ``*`` before its title.  Both settings are stored as soon as they
-change, so the next run opens the table the way this one left it; the help
-screen lists the saved options.
+machine's local zone; the ``DATE`` title names the zone in force.  The key also
+works on the help screen, where the option list shows the value the table will
+use.  ``s`` flips the table between version order and upload-date order, and the
+sorted column carries a ``*`` before its title.  Both settings are stored as
+soon as they change, so the next run opens the table the way this one left it;
+the help screen lists the saved options.
 
 ``/`` opens an incremental search at the end of the hint line; the bare ``/``
 is always shown, even with an empty pattern.  The pattern is a case-insensitive
@@ -48,11 +49,12 @@ yet a valid expression, as while a character class is being typed -- leaves
 the table unfiltered rather than flashing it empty.  Once the pattern is
 closed, ``x``, ``X``, ``u`` and ``U`` act on the visible rows only.
 
-``T`` opens the THEMES screen, where ``t`` cycles the color theme and ``ESC``
-returns to the table.  The theme key is listed on the help screen only, not in
-the hint line.  The app's ``mono`` choice is not a palette: it turns semantic
-color off, exactly like ``--no-color``, and the choice is remembered for the
-next run just like the other saved options.
+``T`` opens the THEMES screen from the table or the help screen, where ``t``
+cycles the color theme and ``ESC`` returns to the screen that opened it; ``t``
+cycles the same list on the help screen too.  The theme key is listed on the
+help screen only, not in the hint line.  The app's ``mono`` choice is not a
+palette: it turns semantic color off, exactly like ``--no-color``, and the
+choice is remembered for the next run just like the other saved options.
 
 ``d`` is advertised at the front of the hint line once anything is marked and
 no pattern is in force: a filtered table can hide the releases a deletion would
@@ -1021,23 +1023,28 @@ class CleanupApp:
         # _ACTION method: it rewrites the option in place, the next draw reads
         # it, and handle_key() is where the remembered ones are stored.
         #
-        # z rewrites the time zone the DATE column names.
+        # z rewrites the time zone the DATE column names.  The help screen
+        # lists the same cycle, so the key works there too and the value shown
+        # beside it is the one the table will use.
         spin.add_key('time_zone', 'z - date time zone',
                      vals=list(ZONES), keys=[ord('z')],
-                     scope={MAIN_ST})
-        # t only works on the THEMES screen; handle_key() applies the palette
-        # or the mono color mode as soon as the value changes.
+                     scope={MAIN_ST, HELP_ST})
+        # t works on the THEMES screen and on the help screen; handle_key()
+        # applies the palette or the mono color mode as soon as the value
+        # changes.
         spin.add_key('theme', 't - cycle themes', vals=list(THEME_CHOICES),
-                     keys=[ord('t')], scope={THEME_ST})
+                     keys=[ord('t')], scope={THEME_ST, HELP_ST})
         # The stability gap is a hidden option: g rotates it on the help screen
         # and applies it on the table, so one key is bound twice with two
         # meanings -- a cycle on one screen, an action on the other.
         spin.add_key('gap', 'g - stability gap, in days', vals=list(GAP_CHOICES),
                      keys=[ord('g')], scope={HELP_ST})
-        # T opens the picker; it is the only way in, and t is bound only on
-        # that screen so the table keeps its own keys untouched.
+        # T opens the picker from the table or the help screen, so ESC returns
+        # to whichever screen pushed it.  It is not bound on the picker itself,
+        # so the stack cannot recurse, and t is not bound on the table, so the
+        # table keeps its own keys untouched.
         spin.add_key('theme_screen', 'T - themes', genre='action',
-                     keys=[ord('T')], scope={MAIN_ST})
+                     keys=[ord('T')], scope={MAIN_ST, HELP_ST})
         # P opens the working package list, which is a different view of the
         # same list p rotates through: p steps the table to the next package,
         # P edits the list itself.
@@ -1519,6 +1526,10 @@ class CleanupScreen(Screen):
         """Push the help screen, remembering the pick to return to."""
         self.app.stack.push(HELP_ST, self.app.win.pick_pos)
 
+    def theme_screen_ACTION(self) -> None:
+        """Push the theme picker; ESC returns to the screen that pushed it."""
+        self.app.stack.push(THEME_ST, self.app.win.pick_pos)
+
 
 class MainScreen(CleanupScreen):
     """The release table."""
@@ -1815,9 +1826,6 @@ class MainScreen(CleanupScreen):
     def search_ACTION(self) -> None:
         """Open the incremental search bar at the end of the hint line."""
         self.app.start_search()
-
-    def theme_screen_ACTION(self) -> None:
-        self.app.stack.push(THEME_ST, self.app.win.pick_pos)
 
     def packages_screen_ACTION(self) -> None:
         """Open the working package list, ready to open the next package."""
