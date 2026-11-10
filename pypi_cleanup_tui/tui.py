@@ -2087,64 +2087,26 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
     """The key-help screen; ESC returns to the screen that opened it."""
 
     def extra_help_paragraphs(self) -> Iterable[str]:
-        """The essentials under the option list, one short bullet each.
+        """The non-obvious bits under the option list, one short bullet each.
 
-        The option list above already names every key, so these bullets only
-        say what a key name cannot: what a value means, which screen a key
-        acts on, and what the next step is.  :meth:`draw_notes` adds the
-        marker and the hanging indent, so the strings here carry none.
+        The option list above already names every key, so these bullets are
+        kept to what a key name cannot say and a developer would not guess.
+        :meth:`draw_notes` adds the marker and the hanging indent, so the
+        strings here carry none.
         """
         bullets = [
-            help_text.theme_paragraph(
-                open_key='T',
-                cycle_key='t',
-                remembered=self.app.ini is not None,
-            ),
-            '/ opens the incremental search at the end of the hint line. The '
-            'pattern is a case-insensitive regular expression matched against '
-            'the version column; ENTER closes it, ESC restores it, and a '
-            'closed pattern limits x, X, u and U to the visible rows only.',
-            'The hint line follows the pick: an unmarked row offers x and X, a '
-            'marked row u and U instead. X and U are inert on a row already in '
-            'the state they would produce.',
-            'd hands the marked releases to pypi-cleanup. It leaves the table '
-            'for the terminal, shows the command, asks for a --query-only dry '
-            'run, then asks again before the --do-it deletion; ENTER takes the '
-            'safe answer (yes to the dry run, no to the deletion) and only '
-            'yes or no are accepted. A failed deletion is offered again behind '
-            'a RETRY: prompt until it succeeds or is declined. A successful one '
-            'drops the deleted versions from the table at once and re-queries '
-            'the package behind them, clearing the marks, search and pick as if '
-            'the package had just been opened. If the index still lists a '
-            'deleted version (its CDN can lag), the row stays hidden and the '
-            'header says STALE after host= until a fetch no longer lists it. '
-            'The printed command describes the run and is not meant to be '
-            'copied. A read-only run (--read-only) never offers d: the hint '
-            'line reads R/O in its place.',
-            'f fetches the current package again without leaving it, so a '
-            'release uploaded since the table was opened appears. A version '
-            'the refreshed history still lists keeps its mark and the pick '
-            'starts over; p and h also reload, but they drop the marks with the '
-            'table when they switch package or index. f also settles STALE: a '
-            'deleted version the index no longer lists clears the marker and '
-            'flashes Fresh, while one it still lists keeps it.',
-            'The authenticator prompt follows --totp-method. expect, the '
-            'default, runs pypi-cleanup through pexpect: answer the password '
-            'and device prompts normally, then press Ctrl+] at the '
-            'Authentication code prompt and the TUI sends the code. auto also '
-            'uses pexpect but never hands control back; use it when the '
-            'password is supplied and the only prompt is for the code. print '
-            'only prints the code above each run; off leaves the prompt '
-            'entirely to you. The choice is remembered.',
-            'g is the stability filter. On this screen it rotates the gap -- '
-            '3, 7, 14, 30 or 60 days; a run starts at 30 and remembers the '
-            'choice -- and on the main screen it unmarks every marked release '
-            'that no newer release followed within that gap, keeping the ones '
-            'that stayed current. The newest release counts as stable too, '
-            'because nothing followed it, and the whole table is judged, not '
-            'just the visible rows.',
-            'P opens the working package list. ESC opens the picked package, x '
-            'removes it, and package arguments are cumulative across runs.',
+            '/ filters the version column only, as a case-insensitive regular '
+            'expression; while a pattern is in force, only the visible rows '
+            'can be marked.',
+            'f refetches the package and keeps the marks; once the index stops '
+            'listing a deleted version, STALE clears and Fresh flashes.',
+            'g is the stability gap: here it rotates 3, 7, 14, 30 or 60 days, '
+            'on the table it unmarks the releases a newer one superseded within '
+            'the gap, and the newest release counts as stable.',
+            'With --totp-method expect (the default), press Ctrl+] at the '
+            'Authentication code prompt and the TUI types the code.',
+            'P is the working package list; x drops a name from the list, '
+            'never from the index.',
         ]
         ini = self.app.ini
         if ini is not None:

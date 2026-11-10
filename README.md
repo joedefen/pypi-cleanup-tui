@@ -1,5 +1,3 @@
-> **UNDER DEVELOPMENT --- BE PATIENT**
-
 # pypi-cleanup-tui
 
 A thin, visual skin over [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/), which performs the actual deletion. Consider using:
@@ -7,19 +5,7 @@ A thin, visual skin over [`pypi-cleanup`](https://pypi.org/project/pypi-cleanup/
 - this TUI to cull per-version and visually: selecting by hand, with the survivors in view;
 - `pypi-cleanup` directly when cull rules are expressible and reusable (`.*rc\d+`, keep-newest, before-a-date), especially for automation across many packages.
 
-```text
- del x:mark X:mark▼ sort zone gap60 fresh quit ?:help /
- User=betazoid pack=vappman host=pypi
- DEL DATE (UTC)        DAYS  *VERSION
-────────────────────────────────
-     2026/11/06 22:04     1  2.2.2
-     2026/10/31 18:13     7  2.2.1
-  ✘  2026/10/28 00:07    10  2.2.0
->    2026/10/13 02:05    25  2.1.7
-     2026/03/01 19:37   251  2.1.6
-```
-
-*The main screen (a mock-up; a GIF is planned). One release is marked `✘` for deletion; `?` lists every key.*
+![pypi-cleanup-tui: demo cull session](https://raw.githubusercontent.com/joedefen/pypi-cleanup-tui/main/images/pypi-cleanup-tui-2026-11-09.gif)
 
 ## Features
 

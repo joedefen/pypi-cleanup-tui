@@ -3178,17 +3178,16 @@ def test_help_screen_lists_the_selection_and_zone_keys():
             assert hint in text
         assert tui_mod.UTC_MODE in text
         assert tui_mod.LOCAL_MODE in text
-        assert 'Color theme' in text
-        assert 'visible rows only' in text
+        assert 'case-insensitive' in text
         assert 'working package list' in text
         # The bullets are wrapped, so compare them with the breaks removed.
-        assert 'newest release counts as stable' in ' '.join(text.split())
-        assert 'leaves the table for the terminal' in ' '.join(text.split())
-        assert 'asks for a --query-only dry run' in ' '.join(text.split())
-        assert 'not meant to be copied' in ' '.join(text.split())
-        assert '--read-only' in text
+        flat = ' '.join(text.split())
+        assert 'only the visible rows can be marked' in flat
+        assert 'newest release counts as stable' in flat
+        assert 'never from the index' in flat
+        assert 'Ctrl+]' in flat
         # The notes read as a bulleted list with a hanging indent.
-        assert any(line.startswith('* Color theme') for line in app.win.body.texts)
+        assert any(line.startswith('* /') for line in app.win.body.texts)
         assert any(line.startswith('  ') for line in app.win.body.texts)
     finally:
         app.win.stop_curses()
