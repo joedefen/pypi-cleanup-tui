@@ -61,10 +61,10 @@ The first name is the package the table opens; the rest is kept for `p` and for 
 | `U` | unmark the picked release and every release below it, then step up (marked row only) |
 | `z` | switch the `DATE` column between UTC and the local time zone (also on the help screen) |
 | `s` | change the sort order |
-| `d` | leave the table, run a `pypi-cleanup` dry run, then the deletion after a second confirmation |
+| `d` | leave the table, run a `pypi-cleanup` dry run, then the deletion after a second confirmation (the newest release is unmarked first when the whole history is marked) |
 | `g` | apply the stability gap on the table; on the help screen, rotate the gap instead |
 
-The second header line names the run: `User=...`, `[p]ack=...` and `[h]ost=...`; `host` is the index key, not a domain. A bold `STALE` follows `host=` while the index has not caught up with a deletion (see below).
+The second header line names the run: `User=...`, `[p]ack=...` and `[h]ost=...`; `host` is the index key, not a domain. A bold `STALE [12m]` follows `host=` while the table is behind the index: either the last refresh failed, or the index still lists a version this run deleted. The age is how long ago the fetch that produced that state was attempted. Once a package has loaded, a failed refresh keeps the old rows and marks and raises the usual alert; a package that never loaded explains the failure in the body instead.
 
 Marked releases take `✘` in `DEL` and dim; the releases that will be kept stay in the success color. `T` lists the palettes; its `mono` entry turns color off.
 
@@ -78,7 +78,8 @@ R/O unmark Unmark▼ sort zone gap30 fresh quit ?:help /     read-only, d never 
 
 * An unmarked row offers `x`/`X`; a marked row offers `u`/`U`.
 * `d` leads once something is marked and no pattern is filtering; a read-only run shows `R/O` instead.
-* `f` refetches the package: marks follow the versions the index still lists, and `STALE` clears once a deletion is confirmed.
+* `f` refetches the package: marks follow the versions the index still lists, and `STALE` clears once a deletion is confirmed. A failed refresh leaves the old table and marks in place, marked `STALE`.
+* `pypi-cleanup` will not remove every release, so a table with its whole history marked gives the newest release back first -- by upload time, not version number -- and says which version that was above the command. A package holding a single release answers with a short `Cannot delete the last remaining version.` box instead of leaving the table.
 
 ### Search and the stability gap
 
@@ -87,18 +88,32 @@ R/O unmark Unmark▼ sort zone gap30 fresh quit ?:help /     read-only, d never 
 
 ### Package screen
 
-`P` opens the package list, whose rows are also what `p` rotates through:
+`P` opens the package list, whose rows are also what `p` rotates through. Each row has one `VERs`/`DELs` pair per index, and the pair for the index the table is currently using comes first:
 
 ```text
 PACKAGES  x:remove ESC:open ?:help
-  PACKAGE  VERs  DELs
-✓ alpha       3     0
-✓ beta        2     0
-  gamma       -     -
+          -- pypi --- -- test ---
+  PACKAGE   VERs  DELs   VERs  DELs
+✓ alpha        3     0      2     0
+✓ beta         2     0      -     -
+  gamma        -     -      -     -
 ```
-* Each row shows whether the package was visited (`✓`), its name, its last known version count and this run's delete count.
-* `ESC` opens the highlighted package in the table.
+* A host label line above the column titles spans each `VERs`/`DELs` pair.
+* `✓` means this run has loaded the package on either host; a host that has not loaded shows `-` in both of its columns.
+* `DELs` is this run's delete count for that host.
+* `ESC` opens the highlighted package in the table on the current host.
 * `x` removes the highlighted package from the TUI's list, not from the index.
+
+### Load states
+
+The table remembers the complete state of each `(package, host)` pair during the run:
+
+* `uninitialized`: no fetch has completed for that pair.
+* `loaded`: the last fetch succeeded, even if it found no releases.
+* `error`: the pair has never loaded successfully. The body shows `ERROR [12s]` in the hot-swap color, a blank line, and the wrapped error; a missing package is a single `NO PACKAGE [12s]` line. No alert interrupts a first load.
+* `stale`: the pair loaded in the past, but the last fetch failed or the index still lists a locally deleted version. The old table is kept and the header shows `STALE [12m]`.
+
+The state markers update as time passes. Switching package or index saves the pair's rows, marks, hidden versions, state and timestamps, and restores them when the pair is revisited. A revisited pair is fetched immediately, except an `error` pair, which is retried only after 15 minutes unless `f` is pressed.
 
 ### Running `pypi-cleanup`
 
@@ -114,7 +129,7 @@ Pressing `d` leaves the table for the bare terminal, runs a `--query-only` dry r
   - **`print`** shows the code and its remaining lifetime above each run; you type it at the prompt (be quick or it may expire).
   - **`off`** leaves answering entirely to you; same behavior as no `$PYPI_CLEANUP_TOTP_SECRET`.
 
-A successful deletion hides the deleted versions and and re-fetches the version list. If the fetched list has deleted versions (its CDN can lag), a bold `STALE` appears in the header until `f` finds the a new version list credibly up-to-date; switching the packages or host drops the `STALE` indicator.
+A successful deletion hides the deleted versions and re-fetches the version list. If the fetched list has deleted versions (its CDN can lag), a bold `STALE [12m]` appears in the header until `f` finds a new version list credibly up-to-date. If that refetch fails, the locally deleted versions stay hidden and the table stays `STALE`. Switching package or host preserves each pair's state, so returning to it restores its marker rather than dropping it.
 
 > **Hints for credentials (to reduce interactive prompts)**
 >
@@ -135,7 +150,7 @@ pypi-cleanup-tui pack2     # an already stored name keeps its position
 `?` lists the saved options and the file they came from.
 
 ## Troubleshooting and Precautions
-* **Stale Version Lists**: the TUI asks the index not to cache, but a proxy or corporate network can still serve old data for up to 15 minutes. `f` refetches; after a deletion the header shows `STALE` until the index stops listing the deleted versions.
+* **Stale Version Lists**: the TUI asks the index not to cache, but a proxy or corporate network can still serve old data for up to 15 minutes. `f` refetches; after a deletion the header shows `STALE [12m]` until the index stops listing the deleted versions. A failed refresh also leaves the old table marked `STALE`, with the alert explaining the failure.
 * **Authenticator/TOTP (Time-based One-time Password) Failures**: if the TUI's codes are rejected, check the machine's clock is NTP-synced and compare the dumped codes with your authenticator app. If the times agree but the codes do not, recheck the secret.
 * **General Credential Failures**: If `pypi-cleanup` fails with an authentication or unrecognized device error (initially or later), log into `pypi.org` and/or `test.pypi.org` from a browser on this same machine and choose to remember the device for 30 days.
 

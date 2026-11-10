@@ -105,7 +105,7 @@ def _mixed():
 def _app(cleanup=None, rows=20, cols=100, ini=None, zone=None,
          theme=None, no_color=None, sort=None, gap=None, read_only=None,
          packages=None, totp_method=None):
-    return tui_mod.CleanupApp(
+    app = tui_mod.CleanupApp(
         cleanup or _cleanup(),
         backend=HeadlessBackend(rows=rows, cols=cols),
         singleton=False,
@@ -119,6 +119,14 @@ def _app(cleanup=None, rows=20, cols=100, ini=None, zone=None,
         packages=packages,
         totp_method=totp_method or tui_mod.DEFAULT_TOTP_METHOD,
     )
+    # These tests build the model directly rather than running main_loop.  A
+    # cleanup that already holds releases stands for a pair that has loaded;
+    # an empty one stands for a pair that has never been fetched.
+    state = app.state
+    state.releases = app.cleanup.versions
+    if app.cleanup.versions:
+        state.status = tui_mod.LOADED
+    return app
 
 
 def _ini(tmp_path):
@@ -1118,12 +1126,15 @@ def test_the_loading_line_uses_the_hotswap_role(monkeypatch):
         app.win.stop_curses()
 
 
-def test_a_failed_load_alerts_and_leaves_the_body_empty(monkeypatch):
-    app = _app()
+def test_a_failed_first_load_shows_the_error_in_the_body(monkeypatch):
+    sentinel = 0x6000
+    monkeypatch.setattr(tui_mod, 'semantic_attr', lambda role: sentinel)
+    app = _app(CleanupTui('demo'))
+    app.clock = lambda: 1000.0
     alerts = []
 
     def broken(self):
-        raise LookupError("package 'demo' was not found on pypi.org")
+        raise RuntimeError('the index is unreachable')
 
     monkeypatch.setattr(CleanupTui, 'fetch_versions', broken)
     monkeypatch.setattr(
@@ -1133,15 +1144,176 @@ def test_a_failed_load_alerts_and_leaves_the_body_empty(monkeypatch):
     try:
         app.load_versions()
 
-        message, title = alerts[0]
-        assert title == 'LOAD ERROR'
-        assert 'not found' in message
-        assert 'LookupError' in message
-        assert app.cleanup.versions == []
+        # A pair that never loaded has no alert: the body itself explains the
+        # failure, and the pair can still be left with p or h.
+        assert alerts == []
         assert app.load_failed is True
+        assert app.state.status == tui_mod.ERROR
+        assert app.cleanup.versions == []
 
         _draw(app)
-        assert app.win.body.row_cnt == 0
+        assert app.win.body.texts[0] == 'ERROR [0s]'
+        assert app.win.body.texts[1] == ''
+        description = ' '.join(app.win.body.texts[2:])
+        assert "Could not load 'demo' from pypi.org." in description
+        assert 'RuntimeError: the index is unreachable' in description
+        assert all(
+            runs[0][0] == sentinel for runs in app.win.body.text_attrs
+        )
+    finally:
+        app.win.stop_curses()
+
+
+def test_a_failed_first_load_for_a_missing_package_shows_one_line(monkeypatch):
+    app = _app(CleanupTui('missing'))
+    app.clock = lambda: 1000.0
+
+    def broken(self):
+        raise LookupError("package 'missing' was not found on pypi.org")
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', broken)
+    monkeypatch.setattr(app.win, 'alert', lambda *args, **kwargs: None)
+    try:
+        app.load_versions()
+        _draw(app)
+
+        assert app.state.status == tui_mod.ERROR
+        assert app.state.no_package is True
+        assert app.win.body.texts == ['NO PACKAGE [0s]']
+    finally:
+        app.win.stop_curses()
+
+
+@pytest.mark.parametrize(
+    ('seconds', 'expected'),
+    [
+        (0, '0s'),
+        (99, '99s'),
+        (100, '1m'),
+        (5999, '99m'),
+        (6000, '1h'),
+        (360000, '100h'),
+        (-5, '0s'),
+    ],
+)
+def test_compact_delta_time_switches_unit_only_when_it_is_shorter(
+        seconds, expected):
+    assert tui_mod.compact_delta_time(1000.0, 1000.0 + seconds) == expected
+
+
+def test_the_error_delta_updates_when_the_clock_advances(monkeypatch):
+    now = [1000.0]
+    app = _app(CleanupTui('demo'))
+    app.clock = lambda: now[0]
+
+    def broken(self):
+        raise RuntimeError('the index is unreachable')
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', broken)
+    monkeypatch.setattr(app.win, 'alert', lambda *args, **kwargs: None)
+    try:
+        app.load_versions()
+        _draw(app)
+        assert app.win.body.texts[0] == 'ERROR [0s]'
+
+        now[0] = 1100.0
+        app.win.clear()
+        _draw(app)
+        assert app.win.body.texts[0] == 'ERROR [1m]'
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_stale_delta_updates_when_the_clock_advances():
+    now = [1000.0]
+    app = _app()
+    app.clock = lambda: now[0]
+    app.state.status = tui_mod.STALE
+    app.state.last_attempt_at = 900.0
+    try:
+        _draw(app)
+        assert app.win.head.texts[1] == (
+            'User=alice pack=demo host=pypi STALE [1m]')
+
+        now[0] = 2500.0
+        app.win.clear()
+        _draw(app)
+        assert app.win.head.texts[1] == (
+            'User=alice pack=demo host=pypi STALE [26m]')
+    finally:
+        app.win.stop_curses()
+
+
+def test_revisiting_an_error_package_waits_for_the_retry_window(monkeypatch):
+    now = [1000.0]
+    app = _app(CleanupTui('a'), packages=['a', 'b'])
+    app.clock = lambda: now[0]
+    app.states[('b', HOST_PYPI)] = tui_mod.PackageState(
+        status=tui_mod.ERROR,
+        last_attempt_at=1000.0,
+        error_message=(
+            "Could not load 'b' from pypi.org.\n\n"
+            "LookupError: package 'b' was not found on pypi.org"
+        ),
+        no_package=True,
+    )
+    fetched, alerts = [], []
+
+    def fetch(self):
+        fetched.append(self.package)
+        if self.package == 'b':
+            raise LookupError("package 'b' was not found on pypi.org")
+        self.versions = [Release('1.0', NOW)]
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fetch)
+    monkeypatch.setattr(
+        app.win, 'alert',
+        lambda message, title='ALERT': alerts.append((message, title)),
+    )
+    try:
+        _press(app, ord('p'))
+        assert app.cleanup.package == 'b'
+        assert fetched == []
+        _draw(app)
+        assert app.win.body.texts == ['NO PACKAGE [0s]']
+        assert alerts == []
+
+        # Once the 15-minute window has passed, revisiting fetches again.
+        now[0] = 1900.0
+        _press(app, ord('p'))          # back to a, which loads
+        _press(app, ord('p'))          # b is now old enough to retry
+        assert fetched == ['a', 'b']
+        assert app.cleanup.package == 'b'
+        assert app.state.status == tui_mod.ERROR
+        assert alerts == []
+    finally:
+        app.win.stop_curses()
+
+
+def test_revisiting_a_loaded_package_fetches_and_keeps_its_marks(monkeypatch):
+    cleanup = CleanupTui('a')
+    cleanup.versions = [Release('2.0', NOW), Release('1.0', NOW)]
+    app = _app(cleanup, packages=['a', 'b'])
+    app.cleanup.versions[0].delete = True
+    app.state.releases = app.cleanup.versions
+    fetched = []
+
+    def fetch(self):
+        fetched.append(self.package)
+        self.versions = [Release('3.0', NOW), Release('2.0', NOW)]
+        return self.versions
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fetch)
+    try:
+        _press(app, ord('p'))
+        _press(app, ord('p'))
+
+        assert fetched == ['b', 'a']
+        assert [
+            (release.version, release.delete)
+            for release in app.cleanup.versions
+        ] == [('3.0', False), ('2.0', True)]
     finally:
         app.win.stop_curses()
 
@@ -1192,22 +1364,37 @@ def test_f_refreshes_the_current_package_and_keeps_the_marks_that_remain(
         app.win.stop_curses()
 
 
-def test_a_failed_refresh_restores_no_marks(monkeypatch):
+def test_a_failed_refresh_keeps_the_old_table_and_marks_as_stale(monkeypatch):
     cleanup = _cleanup3()
     cleanup.versions[0].delete = True
     app = _app(cleanup)
+    app.clock = lambda: 1000.0
+    alerts = []
 
     def broken(self):
-        raise LookupError("package 'demo' was not found on pypi.org")
+        raise LookupError('the index is unreachable')
 
     monkeypatch.setattr(CleanupTui, 'fetch_versions', broken)
-    monkeypatch.setattr(app.win, 'alert', lambda message, title='ALERT': None)
+    monkeypatch.setattr(
+        app.win, 'alert',
+        lambda message, title='ALERT': alerts.append((message, title)),
+    )
     try:
         _draw(app)
         _press(app, ord('f'))
 
+        # A pair that has loaded before keeps the table the user was looking
+        # at, including its marks, and says the view is stale.
         assert app.load_failed is True
-        assert app.cleanup.versions == []
+        assert app.state.status == tui_mod.STALE
+        assert [release.version for release in app.cleanup.versions] == [
+            '2.0', '1.1', '1.0']
+        assert app.cleanup.versions[0].delete is True
+        assert alerts and alerts[0][1] == 'LOAD ERROR'
+
+        _draw(app)
+        assert app.win.head.texts[1] == (
+            'User=alice pack=demo host=pypi STALE [0s]')
     finally:
         app.win.stop_curses()
 
@@ -1215,8 +1402,8 @@ def test_a_failed_refresh_restores_no_marks(monkeypatch):
 def test_f_clears_the_stale_marker_and_says_fresh_when_the_index_catches_up(
         monkeypatch):
     app = _app(_cleanup())
-    app.hidden_versions = {'2.0'}
-    app.stale = True
+    app.state.status = tui_mod.STALE
+    app.state.hidden_versions = {'2.0'}
     flashed = []
 
     def fake_fetch(self):
@@ -1242,8 +1429,8 @@ def test_f_clears_the_stale_marker_and_says_fresh_when_the_index_catches_up(
 def test_f_keeps_the_stale_marker_while_the_index_still_lists_the_version(
         monkeypatch):
     app = _app(_cleanup())
-    app.hidden_versions = {'2.0'}
-    app.stale = True
+    app.state.status = tui_mod.STALE
+    app.state.hidden_versions = {'2.0'}
     flashed = []
 
     def fake_fetch(self):
@@ -1270,8 +1457,13 @@ def test_f_keeps_the_stale_marker_while_the_index_still_lists_the_version(
 
 def test_a_failed_refetch_after_a_deletion_keeps_the_marker(monkeypatch):
     app = _app(_cleanup())
-    app.hidden_versions = {'2.0'}
-    app.stale = True
+    app.state.status = tui_mod.STALE
+    app.state.hidden_versions = {'2.0'}
+    app.state.releases = [
+        release for release in app.cleanup.versions
+        if release.version not in app.state.hidden_versions
+    ]
+    app.cleanup.versions = app.state.releases
 
     def broken(self):
         raise LookupError('the index is unreachable')
@@ -1312,20 +1504,37 @@ def test_p_rotates_the_packages_and_reloads(monkeypatch):
         app.win.stop_curses()
 
 
-def test_a_package_switch_clears_the_stale_marker(monkeypatch):
+def test_a_package_switch_preserves_the_saved_stale_state(monkeypatch):
     app = _app(CleanupTui('a', user='alice'), packages=['a', 'b'])
-    app.hidden_versions = {'0.9'}
-    app.stale = True
-    monkeypatch.setattr(CleanupTui, 'fetch_versions',
-                        lambda self: [Release('1.0', NOW)])
+    app.state.status = tui_mod.STALE
+    app.state.hidden_versions = {'0.9'}
+    app.clock = lambda: 1000.0
+    alerts = []
+
+    def fetch(self):
+        if self.package == 'b':
+            self.versions = [Release('1.0', NOW)]
+            return self.versions
+        raise LookupError('the index is unreachable')
+
+    monkeypatch.setattr(CleanupTui, 'fetch_versions', fetch)
+    monkeypatch.setattr(
+        app.win, 'alert',
+        lambda message, title='ALERT': alerts.append((message, title)),
+    )
     try:
         _press(app, ord('p'))
-
-        # The other package's history cannot confirm a deletion made on this
-        # one, so the marker goes with the table it described.
         assert app.cleanup.package == 'b'
+        assert app.state.status == tui_mod.LOADED
         assert app.hidden_versions == set()
-        assert app.stale is False
+
+        _press(app, ord('p'))
+        # The failed fetch restores the state saved for 'a': its marker and
+        # hidden version came back with it.
+        assert app.cleanup.package == 'a'
+        assert app.state.status == tui_mod.STALE
+        assert app.hidden_versions == {'0.9'}
+        assert alerts and alerts[0][1] == 'LOAD ERROR'
     finally:
         app.win.stop_curses()
 
@@ -1369,10 +1578,10 @@ def test_h_switches_the_index_and_reloads(tmp_path, monkeypatch):
         app.win.stop_curses()
 
 
-def test_an_index_switch_clears_the_stale_marker(monkeypatch):
+def test_an_index_switch_preserves_the_other_hosts_stale_state(monkeypatch):
     app = _app(CleanupTui('demo', user='alice'))
-    app.hidden_versions = {'0.9'}
-    app.stale = True
+    app.state.status = tui_mod.STALE
+    app.state.hidden_versions = {'0.9'}
     monkeypatch.setattr(CleanupTui, 'fetch_versions', lambda self: [])
     try:
         _press(app, ord('h'))
@@ -1380,6 +1589,9 @@ def test_an_index_switch_clears_the_stale_marker(monkeypatch):
         assert app.cleanup.host_key == tui_mod.HOST_TEST
         assert app.hidden_versions == set()
         assert app.stale is False
+        saved = app.states[('demo', tui_mod.HOST_PYPI)]
+        assert saved.status == tui_mod.STALE
+        assert saved.hidden_versions == {'0.9'}
     finally:
         app.win.stop_curses()
 
@@ -1434,20 +1646,42 @@ def test_the_summary_follows_package_and_host_changes(monkeypatch):
 # --- the package list -----------------------------------------------------
 
 def test_package_header_leaves_the_check_column_untitled():
-    header = tui_mod.package_header(7)
+    header = tui_mod.package_header(7, (HOST_PYPI, HOST_TEST))
 
-    assert header == '  PACKAGE  VERs  DELs'
+    assert header == '  PACKAGE  VERs  DELs  VERs  DELs'
     assert header.startswith(' ' * (tui_mod.CHECK_WIDTH + 1))
 
 
-def test_format_package_row_uses_dashes_until_the_package_is_loaded():
-    fresh = tui_mod.PackageSession()
-    loaded = tui_mod.PackageSession(visited=True, versions=12, deleted=3)
+def test_package_host_header_spans_each_vers_dels_pair():
+    header = tui_mod.package_host_header(7, (HOST_PYPI, HOST_TEST))
 
-    assert tui_mod.format_package_row('demo', fresh, 7) == (
-        '  demo' + ' ' * 8 + '-' + ' ' * 5 + '-')
-    assert tui_mod.format_package_row('demo', loaded, 7) == (
-        f'{tui_mod.VISITED_MARK} demo' + ' ' * 7 + '12' + ' ' * 5 + '3')
+    assert header == '          -- pypi --- -- test ---'
+
+
+def test_format_package_row_uses_dashes_until_each_host_is_loaded():
+    hosts = (HOST_PYPI, HOST_TEST)
+    fresh = tui_mod.PackageState()
+    loaded = tui_mod.PackageState(
+        status=tui_mod.LOADED,
+        releases=[Release(str(index), NOW) for index in range(12)],
+        deleted=3,
+    )
+    dash = f"{'-':>{tui_mod.VERS_WIDTH}} {'-':>{tui_mod.DELS_WIDTH}}"
+    blank = f"{' ':^{tui_mod.CHECK_WIDTH}} {'demo':<7} "
+    checked = f"{tui_mod.VISITED_MARK:^{tui_mod.CHECK_WIDTH}} {'demo':<7} "
+
+    # Neither host has loaded: blank check and two dash pairs.
+    assert tui_mod.format_package_row(
+        'demo', {HOST_PYPI: fresh, HOST_TEST: None}, 7, hosts
+    ) == blank + dash + ' ' + dash
+    # Only the second host loaded: the check means "loaded on either host",
+    # while the first host still shows its own dashes.
+    assert tui_mod.format_package_row(
+        'demo', {HOST_PYPI: fresh, HOST_TEST: loaded}, 7, hosts
+    ) == (
+        checked + dash + ' '
+        + f"{'12':>{tui_mod.VERS_WIDTH}} {3:>{tui_mod.DELS_WIDTH}}"
+    )
 
 
 def test_a_successful_load_marks_the_package_visited(monkeypatch):
@@ -1461,8 +1695,8 @@ def test_a_successful_load_marks_the_package_visited(monkeypatch):
     try:
         app.load_versions()
 
-        session = app.session['demo']
-        assert (session.visited, session.versions, session.deleted) == (True, 2, 0)
+        state = app.states[('demo', HOST_PYPI)]
+        assert (state.visited, state.version_count, state.deleted) == (True, 2, 0)
     finally:
         app.win.stop_curses()
 
@@ -1477,7 +1711,9 @@ def test_a_failed_load_leaves_the_package_unvisited(monkeypatch):
     try:
         app.load_versions()
 
-        assert 'demo' not in app.session
+        state = app.states[('demo', HOST_PYPI)]
+        assert state.status == tui_mod.ERROR
+        assert state.visited is False
     finally:
         app.win.stop_curses()
 
@@ -1503,15 +1739,53 @@ def test_the_package_list_shows_checks_and_the_session_totals(monkeypatch):
         app.win.clear()
         app.screens[tui_mod.PACKAGES_ST].draw_screen()
 
+        hosts = (HOST_PYPI, HOST_TEST)
+        dash = f"{'-':>{tui_mod.VERS_WIDTH}} {'-':>{tui_mod.DELS_WIDTH}}"
         assert app.win.head.texts[0] == 'PACKAGES  x:remove ESC:open ?:help'
-        assert app.win.head.texts[1] == tui_mod.package_header(7)
+        assert app.win.head.texts[1] == tui_mod.package_host_header(7, hosts)
+        assert app.win.head.texts[2] == tui_mod.package_header(7, hosts)
         assert app.win.body.row_cnt == 2
-        # 'a' was loaded: check mark, name and its version total.
+        # 'a' was loaded on pypi: check mark, its pypi group, and test dashes.
         assert app.win.body.texts[0].startswith(tui_mod.VISITED_MARK)
         assert app.win.body.texts[0] == (
-            f'{tui_mod.VISITED_MARK} a' + ' ' * 11 + '2' + ' ' * 5 + '0')
-        # 'b' was never fetched: no check mark and two dashes.
-        assert app.win.body.texts[1] == '  b' + ' ' * 11 + '-' + ' ' * 5 + '-'
+            f"{tui_mod.VISITED_MARK:^{tui_mod.CHECK_WIDTH}} {'a':<7} "
+            + f"{'2':>{tui_mod.VERS_WIDTH}} {0:>{tui_mod.DELS_WIDTH}} "
+            + dash
+        )
+        # 'b' was never fetched on either host: no check mark and four dashes.
+        assert app.win.body.texts[1] == (
+            f"{' ':^{tui_mod.CHECK_WIDTH}} {'b':<7} " + dash + ' ' + dash
+        )
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_package_list_puts_the_current_host_pair_first():
+    app = _app(CleanupTui('demo', host=HOST_PYPI))
+    pypi = tui_mod.PackageState(
+        status=tui_mod.LOADED,
+        releases=[Release('2.0', NOW), Release('1.0', NOW)],
+    )
+    test = tui_mod.PackageState(
+        status=tui_mod.LOADED,
+        releases=[Release(str(index), NOW) for index in range(12)],
+        deleted=3,
+    )
+    app.states[('demo', HOST_PYPI)] = pypi
+    app.states[('demo', HOST_TEST)] = test
+    app.cleanup.host_key = HOST_TEST
+    hosts = (HOST_TEST, HOST_PYPI)
+    try:
+        _press(app, ord('P'))
+        _draw_packages(app)
+
+        assert app.win.head.texts[1] == tui_mod.package_host_header(7, hosts)
+        assert app.win.head.texts[2] == tui_mod.package_header(7, hosts)
+        assert app.win.body.texts[0] == (
+            f"{tui_mod.VISITED_MARK:^{tui_mod.CHECK_WIDTH}} {'demo':<7} "
+            + f"{'12':>{tui_mod.VERS_WIDTH}} {3:>{tui_mod.DELS_WIDTH}} "
+            + f"{'2':>{tui_mod.VERS_WIDTH}} {0:>{tui_mod.DELS_WIDTH}}"
+        )
     finally:
         app.win.stop_curses()
 
@@ -1539,7 +1813,7 @@ def test_escape_opens_the_picked_package_and_returns_to_the_table(monkeypatch):
         assert app.cleanup.package == 'b'
         assert app.package_index == 1
         assert fetched == ['a', 'b']
-        assert app.session['b'].versions == 1
+        assert app.states[('b', HOST_PYPI)].version_count == 1
     finally:
         app.win.stop_curses()
 
@@ -2236,12 +2510,84 @@ def test_d_hands_the_marked_versions_to_pypi_cleanup(monkeypatch):
     versions = []
     try:
         _draw(app)
-        monkeypatch.setattr(app, 'hand_off_to_cleanup', versions.append)
+        monkeypatch.setattr(
+            app, 'hand_off_to_cleanup',
+            lambda marked, notice=None: versions.append(marked),
+        )
 
         _press(app, ord('d'))
 
         # Table order, so the dry run and the deletion name the same rows.
         assert versions == [['2.0', '1.0']]
+    finally:
+        app.win.stop_curses()
+
+
+def test_unmark_newest_marked_leaves_a_partial_marking_alone():
+    cleanup = _cleanup3()
+    cleanup.versions[0].delete = True
+
+    # A marking that leaves releases behind is what pypi-cleanup accepts, so
+    # the helper must not take anything away from it.
+    assert tui_mod.unmark_newest_marked(cleanup.versions) is None
+    assert [release.delete for release in cleanup.versions] == [True, False, False]
+
+
+def test_d_gives_back_the_newest_release_by_upload_time(monkeypatch):
+    # Version order and upload order disagree: 2.0 is the older upload, so the
+    # release pypi-cleanup must keep is 1.1, not the highest version number.
+    cleanup = _mixed()
+    for release in cleanup.versions:
+        release.delete = True
+    app = _app(cleanup)
+    calls = []
+    try:
+        _draw(app)
+        monkeypatch.setattr(
+            app, 'hand_off_to_cleanup',
+            lambda marked, notice=None: calls.append((marked, notice)),
+        )
+
+        _press(app, ord('d'))
+
+        assert calls == [(
+            ['2.0'],
+            'Automatically unmarked newest version (1.1); '
+            'you cannot remove them all.',
+        )]
+        # The row given back to the index is unmarked again; the one handed
+        # off keeps its mark.
+        assert [release.delete for release in cleanup.versions] == [True, False]
+    finally:
+        app.win.stop_curses()
+
+
+def test_d_on_a_lone_release_only_flashes_and_stays_in_curses(monkeypatch):
+    cleanup = CleanupTui('demo', user='alice')
+    cleanup.versions = [Release('1.0', NOW)]
+    cleanup.versions[0].delete = True
+    app = _app(cleanup)
+    calls, flashed = [], []
+    try:
+        _draw(app)
+        monkeypatch.setattr(
+            app, 'hand_off_to_cleanup',
+            lambda marked, notice=None: calls.append(marked),
+        )
+        monkeypatch.setattr(
+            app.win, 'flash',
+            lambda message='', duration=2.0: flashed.append(
+                (message, duration)),
+        )
+
+        _press(app, ord('d'))
+
+        # The one release cannot go, so there is nothing to hand off and no
+        # reason to leave curses for a command that would be refused.
+        assert calls == []
+        assert flashed == [
+            ('Cannot delete the last remaining version.', 3.0)]
+        assert cleanup.versions[0].delete is False
     finally:
         app.win.stop_curses()
 
@@ -2316,6 +2662,27 @@ def test_the_hand_off_maps_the_hosts_scoped_credentials(monkeypatch, capsys):
         assert ('+ PYPI_CLEANUP_PASSWORD='
                 'PYPI_CLEANUP_PASSWORD4TEST') in out
         assert 'test-password' not in out
+    finally:
+        app.win.stop_curses()
+
+
+def test_the_hand_off_says_which_version_it_gave_back(monkeypatch, capsys):
+    app = _app()
+    notice = ('Automatically unmarked newest version (2.1); '
+              'you cannot remove them all.')
+    try:
+        monkeypatch.setattr(tui_mod, '_reset_terminal', lambda: None)
+        monkeypatch.setattr(tui_mod, 'press_enter', lambda: None)
+        monkeypatch.setattr(
+            tui_mod, 'ask_yes_no', lambda question, default: False)
+
+        app.hand_off_to_cleanup(['2.0'], notice=notice)
+
+        out = capsys.readouterr().out
+        # The unmarking happened on a table the bare terminal no longer shows,
+        # so it is said first, alone on its line, before the command.
+        assert out.startswith(notice + '\n\n')
+        assert out.index(notice) < out.index('+ pypi-cleanup')
     finally:
         app.win.stop_curses()
 
@@ -2607,7 +2974,7 @@ def test_a_no_to_the_retry_leaves_the_history_alone(monkeypatch):
         # A no to the retry stops the loop: no second do-it, no reload.
         assert [command[1] for command in runs] == ['--query-only', '--do-it']
         assert [release.version for release in cleanup.versions] == ['2.0', '1.0']
-        assert app.session.get('demo') is None
+        assert app.state.deleted == 0
         assert prompts[-1] == "RETRY: Del 1 Versions of 'demo'  [yes OR No]?"
     finally:
         app.win.stop_curses()
@@ -2647,8 +3014,8 @@ def test_a_successful_deletion_reloads_and_clears_the_view(monkeypatch):
         assert app.search_text == ''
         assert app.search_re is None
         assert app.win.pick_pos == 0
-        session = app.session['demo']
-        assert (session.deleted, session.versions) == (1, 2)
+        state = app.states[('demo', HOST_PYPI)]
+        assert (state.deleted, state.version_count) == (1, 2)
         # The fetch no longer lists 2.0, so the index has caught up: nothing is
         # hidden and the summary line has no marker.
         assert app.hidden_versions == set()
@@ -2663,6 +3030,7 @@ def test_a_deleted_version_the_index_still_lists_stays_hidden_and_says_stale(
     cleanup = _cleanup()
     cleanup.versions[0].delete = True
     app = _app(cleanup)
+    app.clock = lambda: 1000.0
     # The CDN is still serving the old history, so the fetch lists 2.0 again.
     cached = [Release('2.0', NOW), Release('1.0', NOW - timedelta(days=10))]
 
@@ -2686,10 +3054,11 @@ def test_a_deleted_version_the_index_still_lists_stays_hidden_and_says_stale(
         assert [release.version for release in cleanup.versions] == ['1.0']
         assert app.hidden_versions == {'2.0'}
         assert app.stale is True
-        assert app.win.head.texts[1] == 'User=alice pack=demo host=pypi STALE'
-        # One bold word after the host: the LABEL role is what renders bold.
+        assert app.win.head.texts[1] == (
+            'User=alice pack=demo host=pypi STALE [0s]')
+        # One bold block after the host: the LABEL role is what renders bold.
         runs = app.win.head.text_attrs[1]
-        assert (curses.A_BOLD, len(' STALE')) in runs
+        assert (curses.A_BOLD, len(' STALE [0s]')) in runs
     finally:
         app.win.stop_curses()
 

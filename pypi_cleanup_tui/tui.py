@@ -61,34 +61,47 @@ no pattern is in force: a filtered table can hide the releases a deletion would
 act on.  Pressing it leaves curses -- the way vappman runs an external command
 -- shows the ``pypi-cleanup`` command built from the marked versions, asks for
 a dry run, shows what that run reports, and then asks before deleting for
-real.  Both questions take ``yes``, ``no``, or a bare ENTER, which chooses the
+real.  The whole history is the one marking that cannot go through:
+``pypi-cleanup`` refuses to remove every release, so the newest one -- by
+upload time, never by version number -- is unmarked first and the bare
+terminal is told which version was given back.  A history holding that single
+release answers with a ``Cannot delete the last remaining version.`` box that
+dismisses itself after three seconds, and curses is never left at all.
+Both questions take ``yes``, ``no``, or a bare ENTER, which chooses the
 safe answer: the dry run is on by default and the deletion is off.  A deletion
 that fails is offered again behind a ``RETRY:`` prompt until it succeeds or the
 user declines.  A successful deletion is believed before it is re-verified: the
 versions leave the table at once, and the re-query runs behind that local view,
 because the index's CDN may keep serving the old history for up to fifteen
 minutes.  While a deleted version is still listed it stays hidden, and the
-summary line carries a bold ``STALE`` after ``host=``; a fetch that no longer
-lists it clears both.  Every trace of the old view -- the marks, the search
-pattern and the pick -- is dropped, exactly as if the package/host pair had just
-been entered, so the refreshed history is what the user sees when the final
-ENTER brings the table back, and switching package or index clears the marker
-with the old table.  A ``--read-only`` run never offers ``d``: the hint block
-reads ``R/O`` instead, always.
+summary line carries a bold ``STALE [12m]`` after ``host=``; a fetch that no
+longer lists it clears both.  Every trace of the old view -- the marks, the
+search pattern and the pick -- is dropped, so the refreshed history is what the
+user sees when the final ENTER brings the table back.  A ``--read-only`` run
+never offers ``d``: the hint block reads ``R/O`` instead, always.
+
+Each ``(package, host)`` pair keeps a complete state for the run -- its rows and
+marks, hidden versions, load status and last fetch time.  A pair that has never
+loaded shows ``ERROR [12s]`` in the body, or ``NO PACKAGE [12s]`` when the index
+reports no such package; no alert interrupts a first load.  A pair that loaded
+before and then fails keeps its old table, becomes ``STALE [12m]`` and shows the
+usual alert.  The state markers update as time passes.  Switching package or
+index saves the pair on screen and restores the one being entered; a revisited
+pair is fetched at once, except an error-state pair, which is retried only after
+fifteen minutes unless ``f`` is pressed.
 
 ``f`` fetches the current package's history again without leaving the package,
 which is how a release uploaded since the table was opened shows up.  The marks
 in force survive the fetch: each marked version is put back on the row that
 lists it in the refreshed history, because the decision was about a release, not
 about the row it happened to sit on.  A version the index no longer lists has
-nothing left to delete and stays gone, and a failed fetch restores nothing
-because it leaves the table as empty as any other failed load.  ``f`` is also
-how the ``STALE`` marker is settled: once the index has caught up with a
-deletion the marker clears and a brief ``Fresh`` says so, while a deleted version
-the index still lists keeps the marker.  The pick starts over with the new
-table.  The keys ``p`` and ``h`` reload the table too, but they first change
-which package or index is queried, so their marks are dropped with the old table
-and their fetch starts without a marker.
+nothing left to delete and stays gone.  A failed fetch is different: the old
+table and its marks are restored and marked ``STALE``, so the user keeps the
+view they had.  ``f`` is also how the ``STALE`` marker is settled: once the
+index has caught up with a deletion the marker clears and a brief ``Fresh`` says
+so, while a deleted version the index still lists keeps the marker.  The pick
+starts over with the new table.  ``p`` and ``h`` switch to another pair and let
+that pair's saved state decide what happens next.
 
 ``g`` is the stability filter, and it means something different on each screen:
 on the help screen it rotates the gap -- 3, 7, 14, 30 or 60 days -- and on the
@@ -102,16 +115,17 @@ other settings, so the next run applies the same one; the hint line carries the
 value as ``gap30``, so the gap in force is always in view.
 
 ``P`` opens the working package list.  Every row carries a check mark once this
-run has loaded the package, its name, how many versions the history held, and
-how many versions this run has deleted; both numbers show ``-`` until the
-package is loaded.  The pick starts on the package ``p`` would show next, so
-``ESC`` -- which opens the picked package in the table and returns -- is one
-keypress from the table's package to the next one; with the list emptied there
-is nothing to open, so ``ESC`` leaves the program instead.  ``x`` removes the
-name from the list (the index keeps it), and ``?`` opens the help screen, whose
-``ESC`` returns to the list.  The list is what the command line remembers, and
-package arguments are cumulative: a run's names go in front of the stored ones
-with duplicates dropped, keeping the first.
+run has loaded the package on either host, its name, and one ``VERs``/``DELs``
+pair per index; the pair for the index the table is using leads the row, above
+it a line such as ``-- pypi --- -- test ---`` labels each pair.  A host that has
+not loaded shows ``-`` in both of its columns.  The pick starts on the package
+``p`` would show next, so ``ESC`` -- which opens the picked package in the table
+and returns -- is one keypress from the table's package to the next one; with
+the list emptied there is nothing to open, so ``ESC`` leaves the program
+instead.  ``x`` removes the name from the list (the index keeps it), and ``?``
+opens the help screen, whose ``ESC`` returns to the list.  The list is what the
+command line remembers, and package arguments are cumulative: a run's names go
+in front of the stored ones with duplicates dropped, keeping the first.
 """
 
 from __future__ import annotations
@@ -124,7 +138,7 @@ import subprocess
 import sys
 import textwrap
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -188,6 +202,23 @@ SCREEN_NAMES = ("MAIN", "HELP", "THEMES", "PACKAGES")
 #: palette into mono and wrap back to the first palette.
 THEME_CHOICES = (*Theme.list_all(), MONO_THEME)
 
+#: The states of one ``(package, host)`` release list.  ``LOADING`` is a
+#: transient drawing state only and is never stored.
+UNINITIALIZED = 'uninitialized'
+LOADED = 'loaded'
+ERROR = 'error'
+STALE = 'stale'
+
+#: Seconds before an error-state package is fetched again after it is revisited.
+#: A pair that has never loaded is likely to keep failing, so switching back to
+#: it inside this window shows the remembered error instead of hammering the
+#: index.  ``f`` still forces a fetch.
+ERROR_RETRY_SECONDS = 15 * 60
+
+#: The narrow width an error description folds to, so the body stays readable
+#: on a 40-column terminal.
+ERROR_TEXT_WIDTH = 40
+
 #: Marker drawn in the DEL column of a release that will be deleted.  It is
 #: declared to the window as a glyph, so a terminal without the character draws
 #: a plain ``x`` instead of losing the meaning of the column.
@@ -211,6 +242,23 @@ DEL_HINT = "del"
 #: The same block while the run is read-only.  It is deliberately as wide as
 #: DEL_HINT, so a run that can never delete keeps the hint line's shape.
 READ_ONLY_HINT = "R/O"
+
+#: What the bare terminal is told when the marking covered the whole history.
+#: ``pypi-cleanup`` will not leave a package with no release at all, so the
+#: newest one is given back before the command is printed.  The version is
+#: named because the row it was marked on is already out of sight.
+UNMARKED_NEWEST_NOTICE = (
+    'Automatically unmarked newest version ({version}); '
+    'you cannot remove them all.'
+)
+
+#: The answer to a history that holds a single release: unmarking the newest
+#: leaves nothing to hand off.  The box says why and dismisses itself, because
+#: there is nothing here for the user to confirm.
+LAST_VERSION_MESSAGE = 'Cannot delete the last remaining version.'
+
+#: How long that box stays up before it goes away on its own.
+LAST_VERSION_FLASH_SECONDS = 3.0
 
 #: The prompt shown after the table has left curses for the deletion command.
 #: The bare terminal has no window to draw in, so the line is decorated and set
@@ -307,11 +355,19 @@ DATE_WIDTH = 16
 DAYS_WIDTH = 5
 VERSION_GAP = 2
 
-#: The package list's untitled check column and its two numeric columns.
+#: The package list's untitled check column and its two numeric columns.  Each
+#: host owns a ``VERs``/``DELs`` pair; the pair is the fixed width a host label
+#: has to span.
 CHECK_WIDTH = 1
 VERS_WIDTH = 5
 DELS_WIDTH = 5
+PACKAGE_GROUP_WIDTH = VERS_WIDTH + 1 + DELS_WIDTH
 PACKAGE_TITLE = "PACKAGE"
+
+#: The shape of the index's "no such package" answer.  A failure that matches
+#: it is shown as a single ``NO PACKAGE`` line rather than a full description.
+MISSING_PACKAGE_PATTERN = re.compile(
+    r"package .+ was not found on .+", re.IGNORECASE)
 
 #: The word the package list puts at the start of its first header line, so the
 #: screen names itself before listing the keys it accepts.
@@ -805,6 +861,34 @@ def _reset_terminal() -> None:
     os.system('clear; stty sane')
 
 
+def is_missing_package_error(exc: BaseException) -> bool:
+    """Whether *exc* is the index's "package not found" answer."""
+    return (
+        isinstance(exc, LookupError)
+        and MISSING_PACKAGE_PATTERN.search(str(exc)) is not None
+    )
+
+
+def compact_delta_time(start: float, end: float | None = None) -> str:
+    """A compact age for a state marker: ``12s``, ``42m`` or ``3h``.
+
+    The unit changes only when the next one can say the same thing more
+    compactly: seconds up to 99, whole minutes up to 99, then whole hours.  A
+    negative difference (a clock skewed into the future) reads as ``0s``.  The
+    caller passes two wall-clock timestamps, and :func:`time.time` supplies the
+    end when it is omitted.
+    """
+    if end is None:
+        end = time.time()
+    delta_sec = max(int(end - start), 0)
+    if delta_sec < 100:
+        return f'{delta_sec}s'
+    delta_min = delta_sec // 60
+    if delta_min < 100:
+        return f'{delta_min}m'
+    return f'{delta_sec // 3600}h'
+
+
 def days_since(uploaded: datetime, now: datetime | None = None,
                mode: str = UTC_MODE, local_tz: tzinfo | None = None) -> int:
     """Calendar days between *uploaded* and *now*, ignoring the time of day.
@@ -885,6 +969,27 @@ def column_header(mode: str = UTC_MODE, sort: str = SORT_BY_VERSION,
     )
 
 
+def unmark_newest_marked(releases: Sequence[Release]) -> Release | None:
+    """Give back the newest release of a fully marked history.
+
+    ``pypi-cleanup`` refuses to delete every release of a package, so a table
+    with its whole history marked answers that wish by keeping one release:
+    the one uploaded last, which is the version the index shows as current.
+    Upload time decides, never the version identifier -- ``1.0.10`` sorts
+    above ``1.0.9`` as a version, but a release published last week is still
+    newer than one uploaded yesterday, and a tie keeps table order.
+
+    A partly marked history is left untouched and answers ``None``, so the
+    caller hands off exactly the marks it was given.  When the newest release
+    was also the only one, the caller is left with nothing to delete.
+    """
+    if not releases or not all(release.delete for release in releases):
+        return None
+    newest = max(releases, key=lambda release: release.uploaded)
+    newest.delete = False
+    return newest
+
+
 def stable_releases(versions: Sequence[Release], gap: int,
                     mode: str = UTC_MODE,
                     local_tz: tzinfo | None = None) -> list[Release]:
@@ -917,22 +1022,42 @@ def stable_releases(versions: Sequence[Release], gap: int,
 
 
 @dataclass
-class PackageSession:
-    """What this run has learned about one package in the working list.
+class PackageState:
+    """Everything this run knows about one ``(package, host)`` release list.
 
-    The package list draws from this ledger rather than from the model, so a
-    package the run has not loaded cannot pretend to know its version count.
-    ``deleted`` is waiting for the deletion step: it stays zero until a real
-    deletion adds to it, which is why a visited package shows ``0`` rather than
-    a made-up total.
+    The state owns both the table view and the package list's totals, because
+    both describe the same index resource.  ``releases`` is the durable copy:
+    :attr:`CleanupApp.cleanup` points at it while the pair is on screen, and a
+    failed fetch restores it instead of emptying the table.  ``visited`` and
+    ``version_count`` are derived, so a never-loaded pair cannot pretend to
+    know either a check mark or a count.
     """
 
-    #: True once :meth:`CleanupApp.load_versions` fetched this package.
-    visited: bool = False
-    #: Releases the history held at the last successful load.
-    versions: int = 0
-    #: Versions removed from this package during this run.
+    #: One of :data:`UNINITIALIZED`, :data:`LOADED`, :data:`ERROR`,
+    #: :data:`STALE`.
+    status: str = UNINITIALIZED
+    #: The last known release list, including each row's delete mark.
+    releases: list[Release] = field(default_factory=list)
+    #: Versions this run deleted that the index has not yet stopped listing.
+    hidden_versions: set[str] = field(default_factory=set)
+    #: Wall-clock time the most recent fetch attempt started.
+    last_attempt_at: float | None = None
+    #: The message a failed fetch would have shown in the old alert.
+    error_message: str = ''
+    #: Whether the failure was the index's "package not found" answer.
+    no_package: bool = False
+    #: Versions removed from this pair during this run.
     deleted: int = 0
+
+    @property
+    def visited(self) -> bool:
+        """True once a fetch for this pair has succeeded."""
+        return self.status in (LOADED, STALE)
+
+    @property
+    def version_count(self) -> int:
+        """How many releases the last successful view holds."""
+        return len(self.releases)
 
 
 def package_width(packages: Sequence[str]) -> int:
@@ -940,30 +1065,75 @@ def package_width(packages: Sequence[str]) -> int:
     return max([len(PACKAGE_TITLE), *(len(name) for name in packages)])
 
 
-def package_header(width: int) -> str:
+def package_host_order(current_host: str) -> tuple[str, str]:
+    """The two hosts with *current_host* first, so its columns lead the row."""
+    other = HOST_TEST if current_host == HOST_PYPI else HOST_PYPI
+    return (current_host, other)
+
+
+def host_group_label(host: str) -> str:
+    """A ``-- host ---`` label spanning one VERs/DELs pair.
+
+    The label is centered in :data:`PACKAGE_GROUP_WIDTH` cells, with dashes
+    filling both sides.  The host key (``pypi`` or ``test``) is used rather than
+    the domain name because the fixed pair is too narrow for ``test.pypi.org``.
+    """
+    label = f' {host} '
+    if len(label) >= PACKAGE_GROUP_WIDTH:
+        return label[:PACKAGE_GROUP_WIDTH].ljust(PACKAGE_GROUP_WIDTH)
+    remaining = PACKAGE_GROUP_WIDTH - len(label)
+    left = remaining // 2
+    return '-' * left + label + '-' * (remaining - left)
+
+
+def package_host_header(width: int, hosts: Sequence[str]) -> str:
+    """The line of host names above the two VERs/DELs column pairs."""
+    prefix = ' ' * (CHECK_WIDTH + 1 + width + 1)
+    return prefix + ' '.join(host_group_label(host) for host in hosts)
+
+
+def package_header(width: int, hosts: Sequence[str]) -> str:
     """The package list's column titles; the check column stays untitled."""
-    return (
+    prefix = (
         f"{' ' * (CHECK_WIDTH + 1)}"
         f"{PACKAGE_TITLE:<{width}} "
-        f"{'VERs':>{VERS_WIDTH}} "
-        f"{'DELs':>{DELS_WIDTH}}"
     )
+    groups = [
+        f"{'VERs':>{VERS_WIDTH}} {'DELs':>{DELS_WIDTH}}"
+        for _host in hosts
+    ]
+    return prefix + ' '.join(groups)
 
 
-def format_package_row(name: str, session: PackageSession, width: int) -> str:
-    """Format one package-list row: check mark, name, version and delete totals.
+def format_package_row(
+    name: str,
+    states: Mapping[str, PackageState | None],
+    width: int,
+    hosts: Sequence[str],
+) -> str:
+    """Format one package-list row with one VERs/DELs pair per host.
 
-    An unvisited package shows a blank check cell and ``-`` in both number
-    columns: the screen must not suggest a count the run never fetched.
+    The check column means this run has loaded the package on either host.  A
+    host with no successful fetch shows ``-`` in both of its columns, because
+    the screen must not invent a count the run never fetched.
     """
-    mark = VISITED_MARK if session.visited else ' '
-    versions = str(session.versions) if session.visited else '-'
-    deleted = str(session.deleted) if session.visited else '-'
+    visited = any(
+        state is not None and state.visited for state in states.values()
+    )
+    mark = VISITED_MARK if visited else ' '
+    groups: list[str] = []
+    for host in hosts:
+        state = states.get(host)
+        if state is None or not state.visited:
+            versions = deleted = '-'
+        else:
+            versions = str(state.version_count)
+            deleted = str(state.deleted)
+        groups.append(f'{versions:>{VERS_WIDTH}} {deleted:>{DELS_WIDTH}}')
     return (
         f"{mark:^{CHECK_WIDTH}} "
         f"{name:<{width}} "
-        f"{versions:>{VERS_WIDTH}} "
-        f"{deleted:>{DELS_WIDTH}}"
+        + ' '.join(groups)
     )
 
 
@@ -1048,10 +1218,13 @@ class CleanupApp:
         if cleanup.package not in self.packages:
             self.packages.insert(0, cleanup.package)
         self.package_index = self.packages.index(cleanup.package)
-        #: This run's ledger per package: loaded or not, its version count and
-        #: how many versions were deleted from it.  Kept on the application,
-        #: not in the options file, because it describes only this session.
-        self.session: dict[str, PackageSession] = {}
+        #: Complete state of every ``(package, host)`` pair this run has seen.
+        #: It holds the table and the package-list totals together, and it is
+        #: kept on the application because it describes only this session.
+        self.states: dict[tuple[str, str], PackageState] = {}
+        #: Wall-clock source for state deltas and the error-retry window.  A
+        #: test can replace it with a frozen clock.
+        self.clock: Callable[[], float] = time.time
         #: The row the package list should put the pick on the next time it
         #: draws.  ``P`` sets it to the package ``p`` would show next, so the
         #: list opens one rotation step ahead of the table; the draw that
@@ -1063,16 +1236,10 @@ class CleanupApp:
         self.sort = sort
         #: State for the frame drawn while :meth:`load_versions` fetches.
         self.loading = False
+        #: Whether the most recent fetch attempt failed.  The display reads the
+        #: state instead; this flag is what ``f`` uses to avoid re-applying the
+        #: old marks over a table that was just restored.
         self.load_failed = False
-        #: Versions this session deleted that a refetch has not yet dropped.
-        #: They are hidden from the table even while the index still lists
-        #: them, because the local table is the one place that knows the
-        #: deletion happened; the CDN may serve the old history for a while.
-        self.hidden_versions: set[str] = set()
-        #: Whether the last successful fetch still listed a hidden version.
-        #: The summary line says ``STALE`` while it does, so a table that hides
-        #: rows the index still reports never pretends to be current.
-        self.stale = False
         #: Text of the incremental search.  An empty string shows every
         #: release; anything else narrows the body to the matching rows.
         self.search_text = ''
@@ -1363,13 +1530,18 @@ class CleanupApp:
         self.win.set_theme(choice)
         self.persist(theme=choice, no_color=False)
 
-    def hand_off_to_cleanup(self, versions: Sequence[str]) -> None:
+    def hand_off_to_cleanup(self, versions: Sequence[str],
+                            notice: str | None = None) -> None:
         """Leave curses for ``pypi-cleanup``, show the runs, and come back.
 
         The window is suspended, not stopped, the same way vappman runs its
         helper commands: ``endwin()`` restores the tty -- so the subprocess and
         its questions work -- and ``resume_curses()`` reattaches the screen,
         which the redrawing ``render()`` repaints from the preserved table.
+        *notice* is a line to say on the bare terminal before the command; the
+        caller uses it for a change it made behind the table's back, such as
+        the newest release unmarked because the whole history was marked.
+        Nothing is printed for ``None``, which is the ordinary hand-off.
         The flow is two runs: a ``--query-only`` dry run, then a ``--do-it``
         deletion that is retried until it succeeds; each question defaults to
         the harmless answer, a bare ENTER takes it, and anything but ``yes`` or
@@ -1395,6 +1567,12 @@ class CleanupApp:
         self.win.suspend_curses()
         try:
             _reset_terminal()
+            if notice:
+                # The table that held the mark is out of sight, so the one
+                # thing the screen cannot say on its own is said here, above
+                # the command, instead of being lost with the redraw.
+                print(notice)
+                print()
             print(format_command(base, env=mapped))
             print()
             if ask_yes_no(DRY_RUN_PROMPT, default=True):
@@ -1495,32 +1673,29 @@ class CleanupApp:
         to fifteen minutes.  A refetch that lists a deleted version must not put
         it back on the table, so the hidden set outlives the fetch and the
         summary line says ``STALE`` until a fetch returns a history without it.
-        Every trace of the old view -- the marks, the search pattern and the
-        pick -- is dropped, exactly as if the package/host pair had just been
-        entered, and the session ledger keeps the count so the package list's
-        DELs column reflects what this run actually removed.
+        The visible rows are reduced at once, so a failed refetch restores a
+        table that still honours the deletion.  Every trace of the old view --
+        the marks, the search pattern and the pick -- is dropped, and the pair's
+        state keeps the deletion count for the package list's DELs column.
         """
-        session = self.package_session(self.cleanup.package)
-        session.deleted += len(versions)
+        state = self.state
+        state.deleted += len(versions)
         # A second deletion while the first is still unconfirmed adds to the
         # hidden set; replacing it would let the older versions reappear in
         # the next fetch that still lists them.
-        self.hidden_versions |= set(versions)
-        self.stale = True
+        state.hidden_versions |= set(versions)
+        state.releases = [
+            release for release in state.releases
+            if release.version not in state.hidden_versions
+        ]
+        for release in state.releases:
+            release.delete = False
+        self.cleanup.versions = state.releases
+        state.status = STALE
         self.search_text = ''
         self.search_re = None
         self.search_anchor = None
         self.load_versions()
-
-    def clear_staleness(self) -> None:
-        """Forget a deletion the index has not acknowledged yet.
-
-        Whether the old table's deletion has propagated says nothing about a
-        different package or index, so a switch drops the hidden versions and
-        the ``STALE`` marker with the table they described.
-        """
-        self.hidden_versions.clear()
-        self.stale = False
 
     def _settle_hidden_versions(self) -> None:
         """Keep hidden versions out of a fetched history and note the result.
@@ -1531,17 +1706,18 @@ class CleanupApp:
         re-adds a release the user already deleted.  With nothing left to hide
         the history is what the index holds and the marker clears.
         """
-        if not self.hidden_versions:
-            self.stale = False
+        state = self.state
+        if not state.hidden_versions:
+            state.status = LOADED
             return
         fetched = {release.version for release in self.cleanup.versions}
-        self.hidden_versions &= fetched
-        if self.hidden_versions:
+        state.hidden_versions &= fetched
+        if state.hidden_versions:
             self.cleanup.versions = [
                 release for release in self.cleanup.versions
-                if release.version not in self.hidden_versions
+                if release.version not in state.hidden_versions
             ]
-        self.stale = bool(self.hidden_versions)
+        state.status = STALE if state.hidden_versions else LOADED
 
     def _option_for(self, key: int) -> SimpleNamespace | None:
         """The spinner option bound to *key* on the current screen, if any."""
@@ -1563,31 +1739,83 @@ class CleanupApp:
         values.setdefault('host', self.cleanup.host_key)
         self.ini.save(**values)
 
-    def package_session(self, package: str) -> PackageSession:
-        """This run's ledger for *package*, created empty on first look."""
-        return self.session.setdefault(package, PackageSession())
+    @property
+    def state(self) -> PackageState:
+        """The mutable state of the ``(package, host)`` pair on screen."""
+        key = (self.cleanup.package, self.cleanup.host_key)
+        return self.states.setdefault(key, PackageState())
 
-    def note_loaded(self) -> None:
-        """Record that the current package's history has just been fetched."""
-        session = self.package_session(self.cleanup.package)
-        session.visited = True
-        session.versions = len(self.cleanup.versions)
+    @property
+    def hidden_versions(self) -> set[str]:
+        """The hidden versions of the pair on screen (read-only view)."""
+        return self.state.hidden_versions
+
+    @property
+    def stale(self) -> bool:
+        """Whether the pair on screen is in its ``STALE`` state."""
+        return self.state.status == STALE
+
+    def state_for(self, package: str, host: str) -> PackageState | None:
+        """The saved state for a pair, or ``None`` if this run never saw it."""
+        return self.states.get((package, host))
+
+    def switch_to(self, package: str, host: str) -> None:
+        """Show another pair, restoring the complete state saved for it.
+
+        The pair on screen keeps its rows, marks, hidden versions and state
+        marker in :attr:`states`, so revisiting it returns all of them.  A
+        never-loaded pair is fetched at once.  A pair whose last attempt failed
+        is fetched only once the error-retry window has passed; inside that
+        window its remembered error is shown instead.  An explicit refresh
+        (``f``) bypasses this method and always fetches.
+        """
+        if package == self.cleanup.package and host == self.cleanup.host_key:
+            return
+        # The model is the current pair's live copy; make the durable state
+        # point at it before the model is pointed at another pair.
+        self.state.releases = self.cleanup.versions
+        self.cleanup.package = package
+        self.cleanup.host_key = host
+        target = self.state
+        self.cleanup.versions = list(target.releases)
+        self.cleanup.sort_versions(self.sort)
+        marked = {
+            release.version for release in target.releases if release.delete
+        }
+        self.win.pick_pos = 0
+        if target.status == ERROR and not self._error_retry_due(target):
+            self.win.clear()
+            return
+        self.load_versions()
+        if self.load_failed:
+            return
+        # A successful visit replaces the rows, so the saved marks are put
+        # back by version: the decision belonged to the release, not the row.
+        for release in self.cleanup.versions:
+            if release.version in marked:
+                release.delete = True
+        target.releases = self.cleanup.versions
+
+    def _error_retry_due(self, state: PackageState) -> bool:
+        """Whether an error-state pair is old enough to be fetched again."""
+        return (
+            state.last_attempt_at is None
+            or self.clock() - state.last_attempt_at >= ERROR_RETRY_SECONDS
+        )
 
     def select_package(self, package: str) -> None:
-        """Make *package* the table's package without fetching it.
+        """Make *package* the table's package on the current host.
 
         The package list only offers names it holds, so a name that is not in
         the list is ignored rather than added behind the user's back.  Landing
-        on the package already shown changes nothing, so a stale marker left by
-        a deletion survives it; landing on another package drops the marker with
-        the table the deletion belonged to.
+        on the package already shown changes nothing; landing on another
+        restores that pair's saved table or fetches it as :meth:`switch_to`
+        decides.
         """
         if package not in self.packages:
             return
         self.package_index = self.packages.index(package)
-        if package != self.cleanup.package:
-            self.clear_staleness()
-        self.cleanup.package = package
+        self.switch_to(package, self.cleanup.host_key)
 
     def remove_package(self, package: str) -> None:
         """Drop *package* from the working list, leaving the index untouched.
@@ -1627,12 +1855,18 @@ class CleanupApp:
         return min(self.package_index, len(self.packages) - 1)
 
     def load_versions(self) -> None:
-        """Clear the table, show ``Loading ...``, then fetch and sort.
+        """Show ``Loading ...``, fetch, and move the pair to its next state.
 
-        The failure path is a modal alert carrying the exception type and
-        text; the table is left empty so the user can pick another package
-        (``p``) or index (``h``) instead of losing the terminal.
+        A successful fetch replaces the rows.  A failure depends on whether
+        this pair has ever loaded: a pair that has keeps the old table, becomes
+        ``STALE`` and shows the modal alert; a pair that never loaded keeps no
+        rows, becomes ``ERROR`` and shows the error in the body instead.  The
+        pair's state is durable, so switching away and back restores whichever
+        result this produced.
         """
+        state = self.state
+        previous_status = state.status
+        previous_pick = self.win.pick_pos
         self.loading = True
         self.load_failed = False
         self.cleanup.versions = []
@@ -1640,27 +1874,61 @@ class CleanupApp:
         self.win.clear()
         self._draw_current_screen()
         self.win.render()
+        state.last_attempt_at = self.clock()
         try:
             self.cleanup.fetch_versions()
         except Exception as exc:
-            # A lookup, network or JSON failure is the same to the user: show
-            # the details and let them choose another package or index.
             self.load_failed = True
-            self.win.alert(
-                f'Could not load {self.cleanup.package!r} from '
-                f'{self.cleanup.host}.\n\n'
-                f'{type(exc).__name__}: {exc}',
-                title='LOAD ERROR',
-            )
+            self._handle_load_failure(
+                state, previous_status, previous_pick, exc)
             return
         finally:
             self.loading = False
             self.win.clear()
         self.cleanup.sort_versions(self.sort)
+        state.releases = self.cleanup.versions
+        state.error_message = ''
+        state.no_package = False
+        state.status = LOADED
         self._settle_hidden_versions()
-        # Only a successful fetch makes the package visited: a failed one has
-        # no version count, and the package list must not invent a zero.
-        self.note_loaded()
+        state.releases = self.cleanup.versions
+
+    def _load_error_message(self, exc: BaseException) -> str:
+        """The alert text a failed fetch has always used."""
+        return (
+            f'Could not load {self.cleanup.package!r} from '
+            f'{self.cleanup.host}.\n\n'
+            f'{type(exc).__name__}: {exc}'
+        )
+
+    def _handle_load_failure(
+        self,
+        state: PackageState,
+        previous_status: str,
+        previous_pick: int,
+        exc: BaseException,
+    ) -> None:
+        """Record a failed fetch and choose the alert or the body error.
+
+        A pair that has loaded before is stale: its old rows and marks are
+        restored, and the failure is a modal alert.  A pair that has never
+        loaded is an error: there is no table to keep, and the body itself
+        carries the explanation, so no alert interrupts the user.
+        """
+        message = self._load_error_message(exc)
+        state.error_message = message
+        state.no_package = is_missing_package_error(exc)
+        if previous_status in (LOADED, STALE):
+            state.status = STALE
+            self.cleanup.versions = state.releases
+            self.cleanup.sort_versions(self.sort)
+            count = len(self.visible_versions())
+            self.win.pick_pos = min(previous_pick, count - 1) if count else 0
+            self.win.alert(message, title='LOAD ERROR')
+            return
+        state.status = ERROR
+        state.releases = []
+        self.cleanup.versions = []
 
     def _draw_current_screen(self) -> None:
         """Draw the screen on top, or the table before the first push."""
@@ -1796,12 +2064,16 @@ class MainScreen(CleanupScreen):
         summary.text(f'User={cleanup_user(cleanup) or "n/a"} ')
         summary.bracket_key('p').text(f'ack={cleanup.package} ')
         summary.bracket_key('h').text(f'ost={cleanup.host_key}')
-        # A deletion the index has not acknowledged yet: the deleted versions
-        # are hidden locally, so the table is honest only if it says so.  The
-        # LABEL role renders bold, which is what sets the one word apart from
-        # the literal values around it.
-        if self.app.stale:
-            summary.label(' STALE')
+        # The table is stale when the last fetch failed or when a deletion the
+        # index has not acknowledged yet leaves hidden versions.  The LABEL
+        # role renders bold, and the age says how long ago the attempt that
+        # produced this view was made.
+        state = self.app.state
+        if state.status == STALE:
+            now = self.app.clock()
+            start = state.last_attempt_at
+            age = compact_delta_time(now if start is None else start, now)
+            summary.label(f' STALE [{age}]')
         win.add_fancy_header(summary)
         # The column titles are the third header line: dim, and deliberately
         # not underlined, so the releases below stay the visually strongest
@@ -1868,12 +2140,12 @@ class MainScreen(CleanupScreen):
                 context=Context(genre='DECOR'),
             )
             return
+        state = self.app.state
+        if state.status == ERROR:
+            self._draw_error_body(state)
+            return
         versions = self.app.visible_versions()
         if not versions:
-            # A failed load is already explained by the alert; an empty body
-            # avoids claiming the history really has no releases.
-            if self.app.load_failed:
-                return
             win.add_body(
                 ('No matching releases.' if self.app.search_text
                  else 'No releases found.'),
@@ -1895,6 +2167,35 @@ class MainScreen(CleanupScreen):
                 win.add_body(row[DEL_WIDTH:], attr=curses.A_DIM, resume=True)
             else:
                 win.add_body(row, attr=keep_attr, context=context)
+
+    def _draw_error_body(self, state: PackageState) -> None:
+        """Draw a never-loaded pair's failure instead of a release table.
+
+        The body is the only explanation for an ``ERROR`` pair: no popup
+        interrupts the first load.  A missing package answers with one line;
+        anything else shows the age, a blank line, and the wrapped description
+        an alert would have contained.  Every line carries the same HOTSWAP
+        role, so the block reads as one piece of state rather than as rows.
+        """
+        win = self.app.win
+        attr = semantic_attr(Theme.HOTSWAP)
+        context = Context(genre='DECOR')
+        now = self.app.clock()
+        start = state.last_attempt_at
+        age = compact_delta_time(now if start is None else start, now)
+        if state.no_package:
+            win.add_body(f'NO PACKAGE [{age}]', attr=attr, context=context)
+            return
+        win.add_body(f'ERROR [{age}]', attr=attr, context=context)
+        win.add_body('', attr=attr, context=context)
+        width = max(ERROR_TEXT_WIDTH, min(win.get_pad_width(), 78))
+        for index, paragraph in enumerate(state.error_message.split('\n\n')):
+            if index:
+                win.add_body('', attr=attr, context=context)
+            for line in textwrap.wrap(
+                paragraph, width=width, break_on_hyphens=False
+            ):
+                win.add_body(line, attr=attr, context=context)
 
     # --- selection -------------------------------------------------------
     #
@@ -1973,14 +2274,30 @@ class MainScreen(CleanupScreen):
         can never be swept up by a deletion the user could not see coming.  The
         marked versions are read in table order, so the dry run and the
         deletion name exactly the rows that were on screen.
+
+        A marking that covers the whole history cannot go through, because
+        ``pypi-cleanup`` refuses to leave a package with no release at all:
+        the newest release is unmarked first and the hand-off says so.  With a
+        history that holds only that one release there is nothing left to ask
+        about, so the answer is a brief box instead of the bare terminal.
         """
         if not self._deletion_offered():
             return
-        self.app.hand_off_to_cleanup([
-            release.version
-            for release in self.app.cleanup.versions
-            if release.delete
-        ])
+        releases = self.app.cleanup.versions
+        notice = None
+        given_back = unmark_newest_marked(releases)
+        if given_back is not None:
+            if not any(release.delete for release in releases):
+                self.app.win.flash(
+                    LAST_VERSION_MESSAGE,
+                    duration=LAST_VERSION_FLASH_SECONDS,
+                )
+                return
+            notice = UNMARKED_NEWEST_NOTICE.format(version=given_back.version)
+        self.app.hand_off_to_cleanup(
+            [release.version for release in releases if release.delete],
+            notice=notice,
+        )
 
     def apply_gap_ACTION(self) -> None:
         """Keep the marked releases that stayed current for the stability gap.
@@ -2030,10 +2347,9 @@ class MainScreen(CleanupScreen):
         are collected by version before ``load_versions`` drops the old rows,
         and every version the refreshed history still lists is marked again:
         the user decided about a release, not about the row it sat on, so a new
-        upload above it must not undo the choice.  A version the index no longer
-        lists has nothing left to delete and stays gone, and a failed fetch
-        restores nothing because the table is empty either way.  The pick
-        starts over with the new table, exactly as after ``p`` or ``h``.
+        upload above it must not undo the choice.  A failed fetch is different
+        now: the restored stale table already carries its marks, so there is
+        nothing to reapply and the user keeps the view they had.
 
         A refresh is also how a deletion is confirmed: the fetch settles the
         hidden versions, and when the last one is gone a brief ``Fresh`` says
@@ -2041,7 +2357,7 @@ class MainScreen(CleanupScreen):
         disappearance unexplained.
         """
         app = self.app
-        was_stale = app.stale
+        was_stale = app.state.status == STALE
         marked = {release.version for release in app.cleanup.versions
                   if release.delete}
         app.load_versions()
@@ -2050,7 +2366,7 @@ class MainScreen(CleanupScreen):
         for release in app.cleanup.versions:
             if release.version in marked:
                 release.delete = True
-        if was_stale and not app.stale:
+        if was_stale and app.state.status == LOADED:
             app.win.flash('Fresh', duration=2.0)
 
     def package_next_ACTION(self) -> None:
@@ -2064,23 +2380,14 @@ class MainScreen(CleanupScreen):
         if next_index is None or app.packages[next_index] == app.cleanup.package:
             return
         app.package_index = next_index
-        app.cleanup.package = app.packages[next_index]
-        # The next package's history says nothing about the old one's
-        # deletion, so the stale marker goes with the table it described.
-        app.clear_staleness()
-        app.load_versions()
+        app.switch_to(app.packages[next_index], app.cleanup.host_key)
 
     def host_next_ACTION(self) -> None:
         """Switch between pypi.org and test.pypi.org and reload."""
         cleanup = self.app.cleanup
-        cleanup.host_key = (
-            HOST_TEST if cleanup.host_key == HOST_PYPI else HOST_PYPI
-        )
-        self.app.persist(host=cleanup.host_key)
-        # The other index is a different resource: its history cannot confirm
-        # or contradict a deletion made on this one.
-        self.app.clear_staleness()
-        self.app.load_versions()
+        target = HOST_TEST if cleanup.host_key == HOST_PYPI else HOST_PYPI
+        self.app.persist(host=target)
+        self.app.switch_to(cleanup.package, target)
 
 
 class HelpScreen(CleanupScreen, BasicHelpScreen):
@@ -2098,8 +2405,12 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
             '/ filters the version column only, as a case-insensitive regular '
             'expression; while a pattern is in force, only the visible rows '
             'can be marked.',
-            'f refetches the package and keeps the marks; once the index stops '
-            'listing a deleted version, STALE clears and Fresh flashes.',
+            'd never removes the whole history: pypi-cleanup keeps one '
+            'release, so the newest is unmarked first, and a package with a '
+            'single release is not offered for deletion at all.',
+            'f refetches the package and keeps the marks; a failed fetch keeps '
+            'the old table as STALE, and once the index stops listing a deleted '
+            'version STALE clears and Fresh flashes.',
             'g is the stability gap: here it rotates 3, 7, 14, 30 or 60 days, '
             'on the table it unmarks the releases a newer one superseded within '
             'the gap, and the newest release counts as stable.',
@@ -2142,25 +2453,30 @@ class HelpScreen(CleanupScreen, BasicHelpScreen):
 
 
 class PackagesScreen(CleanupScreen):
-    """The working package list, with this session's totals beside each name.
+    """The working package list, with a VERs/DELs pair for each index.
 
     The list is what ``p`` rotates through and what the command line remembers;
-    removing a name here never touches the index itself.  ``ESC`` opens the
-    picked package in the table and returns -- the pick starts on the package
-    ``p`` would show next, so the two keys agree -- ``x`` removes the picked
-    name from the list, and ``?`` opens the help screen (whose ``ESC`` returns
-    here, because the screen stack remembers who pushed it).  With the list
-    emptied there is nothing to open, so ``ESC`` leaves the program rather than
-    returning to a table whose package list is empty.
+    removing a name here never touches the index itself.  Each row carries one
+    ``VERs``/``DELs`` pair per host, and the pair for the index the table is
+    using leads the row; a host label line above the column titles spans each
+    pair.  ``ESC`` opens the picked package in the table and returns -- the
+    pick starts on the package ``p`` would show next, so the two keys agree --
+    ``x`` removes the picked name from the list, and ``?`` opens the help
+    screen (whose ``ESC`` returns here, because the screen stack remembers who
+    pushed it).  With the list emptied there is nothing to open, so ``ESC``
+    leaves the program rather than returning to a table whose package list is
+    empty.
     """
 
     def draw_screen(self) -> None:
         win = self.app.win
         win.set_pick_mode(True, 1)
         width = package_width(self.app.packages)
+        hosts = package_host_order(self.app.cleanup.host_key)
         win.add_fancy_header(self._hint_line(), line_attr=curses.A_DIM)
-        win.add_header(package_header(width), attr=curses.A_DIM)
-        self._draw_body(width)
+        win.add_header(package_host_header(width, hosts), attr=curses.A_DIM)
+        win.add_header(package_header(width, hosts), attr=curses.A_DIM)
+        self._draw_body(width, hosts)
         self._place_pick()
 
     def _place_pick(self) -> None:
@@ -2190,7 +2506,7 @@ class PackagesScreen(CleanupScreen):
         hints.bracket_key('?').text(':help')
         return hints
 
-    def _draw_body(self, width: int) -> None:
+    def _draw_body(self, width: int, hosts: Sequence[str]) -> None:
         win = self.app.win
         if not self.app.packages:
             win.add_body(
@@ -2200,7 +2516,11 @@ class PackagesScreen(CleanupScreen):
             )
             return
         for name in self.app.packages:
-            row = format_package_row(name, self.app.package_session(name), width)
+            states = {
+                host: self.app.state_for(name, host)
+                for host in hosts
+            }
+            row = format_package_row(name, states, width, hosts)
             win.add_body(row, context=Context(genre='item', package=name))
 
     def _picked_package(self) -> str | None:
@@ -2224,13 +2544,11 @@ class PackagesScreen(CleanupScreen):
         if package is None:
             app.running = False
             return
-        changed = package != app.cleanup.package
-        app.select_package(package)
-        # Pop first: load_versions() draws the current screen while it fetches,
-        # and the loading frame must land on the table, not on this list.
+        # Pop first: a switch may call load_versions(), which draws the
+        # current screen while it fetches, and the loading frame must land on
+        # the table, not on this list.
         app.stack.pop()
-        if changed:
-            app.load_versions()
+        app.select_package(package)
 
     def package_remove_ACTION(self) -> None:
         """Remove the picked name from the list, keeping the pick on a row."""
