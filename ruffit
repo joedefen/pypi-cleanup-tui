@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+"""ruffit -- the local check gate for this checkout.
+
+    ./ruffit              run every check; exit 0 only when all pass
+    ./ruffit --fix        let ruff apply its safe fixes, then run every check
+    ./ruffit --lint       stop after the ruff check
+    ./ruffit --no-smoke   skip the headless render
+
+The gate is the set of checks a change has to pass before it is worth committing,
+and it is the same list used by hand:
+
+  ruff        the lint rules the project meets, with the line-length ceiling
+              and the noqa policy the source already satisfies
+  compile     every module byte-compiles, including the `runner` launcher
+  pyproject   the metadata parses and still names a callable console script
+  cli         the console script starts and reports this project's version
+  render      a headless console-window pass draws the table and the help page
+  pip         the installed environment satisfies the declared dependencies
+  pytest      the test suite, when `tests/` exists
+
+The interpreter is the checkout's `.venv` when it exists,
+because that is where the dependencies,
+ruff and pytest live; set `RUFFIT_PYTHON` to point at another one.
+The script re-execs itself under that interpreter,
+so `./ruffit` works from a shell whose `python3` is not the project's.
+`ruff` is run as `python -m ruff` from that interpreter,
+falling back to a `ruff` on PATH; a missing ruff is a failure,
+because the lint is the point.  A check whose tool is genuinely optional -- pip,
+pytest -- is reported as `skip` and does not fail the gate.
+
+A check keeps its policy here, not in a config file,
+so the gate is the same from any editor: RUFF_SELECT
+is the rule families the code is clean under,
+RUFF_LINE_LENGTH is the ceiling those files already meet,
+and RUFF_IGNORE holds RUF100 because the deliberate `# noqa: ANN401`
+comments in `ini.py` await the day ANN joins RUFF_SELECT.
+"""
+
+from __future__ import annotations
+
+import importlib
+import os
+import shutil
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+#: The checkout this script belongs to.
+ROOT = Path(__file__).resolve().parent
+
+#: The import package, which is also the lint target beside `runner`.
+PACKAGE = 'pypi_cleanup_tui'
+
+#: Every file ruff sees: the package, the hand-written launcher and this gate.
+LINT_TARGETS = (PACKAGE, 'runner', 'ruffit')
+
+#: The rule families the source is clean under.
+#: E501 is kept but the ceiling is 100, which the longest existing line stays under.
+RUFF_SELECT = 'E,F,W,I,B,C4,RUF,C901'
+RUFF_LINE_LENGTH = '100'
+
+#: Directives that are meaningful only once ANN is part of RUFF_SELECT.
+RUFF_IGNORE = 'RUF100'
+
+#: `curses.ACS_*` exists only after `initscr()`; the
+#: headless backend still draws the separator through them, so the smoke supplies stand-ins.
+_ACS_STANDINS = {
+    'ACS_HLINE': '-',
+    'ACS_VLINE': '|',
+    'ACS_ULCORNER': '+',
+    'ACS_URCORNER': '+',
+    'ACS_LLCORNER': '+',
+    'ACS_LRCORNER': '+',
+}
+
+_FAILED = False
+
+
+def run(argv: list[object]) -> subprocess.CompletedProcess[str]:
+    """Run *argv* in the checkout, returning its captured output."""
+    return subprocess.run(
+        [str(part) for part in argv],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def report(label: str, ok: bool | None, detail: str = '') -> None:
+    """Print one result line, with indented output when there is some."""
+    global _FAILED
+    if ok is None:
+        outcome = 'skip'
+    elif ok:
+        outcome = 'ok'
+    else:
+        outcome = 'FAIL'
+        _FAILED = True
+    print(f'{label:<46} {outcome}')
+    if detail.strip():
+        print(textwrap.indent(detail.rstrip(), '    '))
+
+
+def preferred_interpreter() -> Path:
+    """The interpreter that owns this checkout's tools."""
+    override = os.environ.get('RUFFIT_PYTHON')
+    if override:
+        return Path(override)
+    venv_python = ROOT / '.venv' / 'bin' / 'python'
+    return venv_python if venv_python.exists() else Path(sys.executable)
+
+
+def switch_interpreter(argv: list[str]) -> None:
+    """Re-exec under the preferred interpreter when we are not already there.
+
+    The comparison deliberately does not resolve symlinks:
+    `.venv/bin/python` is usually a link to the system interpreter,
+    and resolving both sides would make them look
+    equal while the *environment* (and so ruff,
+    pip and the dependencies) is still the system one.
+    """
+    python = preferred_interpreter()
+    if not python.exists():
+        raise SystemExit(f'ruffit: {python} does not exist')
+    if Path(sys.executable).absolute() == python.absolute():
+        return
+    script = Path(__file__).resolve()
+    os.execv(str(python), [str(python), str(script), *argv])
+
+
+def ruff_tool(python: Path) -> list[str] | None:
+    """The ruff command for *python*, or None when no ruff is reachable."""
+    probe = run([python, '-m', 'ruff', '--version'])
+    if probe.returncode == 0:
+        return [str(python), '-m', 'ruff']
+    found = shutil.which('ruff')
+    return [found] if found else None
+
+
+def check_lint(tool: list[str], fix: bool) -> None:
+    """Lint the package and the launcher, optionally fixing first."""
+    argv = [
+        *tool, 'check', *LINT_TARGETS,
+        '--target-version', 'py311',
+        '--line-length', RUFF_LINE_LENGTH,
+        '--select', RUFF_SELECT,
+        '--ignore', RUFF_IGNORE,
+    ]
+    if fix:
+        fixed = run([*argv, '--fix'])
+        report('ruff check --fix', fixed.returncode == 0,
+               fixed.stdout + fixed.stderr)
+    checked = run(argv)
+    report('ruff check', checked.returncode == 0,
+           checked.stdout + checked.stderr)
+
+
+def check_compile(python: Path) -> None:
+    """Byte-compile the package and the extensionless launcher."""
+    package = run([python, '-m', 'compileall', '-q', PACKAGE])
+    launcher = run([python, '-m', 'py_compile', 'runner'])
+    ok = package.returncode == 0 and launcher.returncode == 0
+    report('byte-compile', ok, package.stderr + launcher.stderr)
+
+
+def check_pyproject() -> None:
+    """Parse the metadata and resolve every console-script entry point."""
+    import tomllib  # noqa: PLC0415 - the gate is only run on 3.11+
+
+    try:
+        data = tomllib.loads(
+            (ROOT / 'pyproject.toml').read_text(encoding='utf-8'))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        report('pyproject metadata', False, str(error))
+        return
+    project = data.get('project', {})
+    scripts = project.get('scripts', {})
+    problems = []
+    if not project.get('name'):
+        problems.append('[project] has no name')
+    if not data.get('build-system', {}).get('build-backend'):
+        problems.append('[build-system] has no build-backend')
+    if not scripts:
+        problems.append('[project.scripts] names no console script')
+    for name, target in scripts.items():
+        module_name, _, attribute = str(target).partition(':')
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError as error:
+            problems.append(f'{name}: {error}')
+            continue
+        if attribute and not callable(getattr(module, attribute, None)):
+            problems.append(
+                f'{name}: {module_name}.{attribute} is not callable')
+    report('pyproject metadata', not problems, '\n'.join(problems))
+
+
+def check_version(python: Path) -> None:
+    """Run the console script and require this project's version output."""
+    result = run([python, '-m', 'pypi_cleanup_tui.main', '--version'])
+    ok = result.returncode == 0 and 'pypi-cleanup-tui ' in result.stdout
+    report('console script --version', ok, result.stdout + result.stderr)
+
+
+def render_smoke() -> str | None:
+    """Draw the table and the help page headlessly; None when both appear."""
+    import curses
+
+    for name, value in _ACS_STANDINS.items():
+        if not hasattr(curses, name):
+            setattr(curses, name, value)
+    try:
+        from datetime import UTC, datetime, timedelta
+
+        from console_window.backend import HeadlessBackend
+
+        from pypi_cleanup_tui.main import CleanupTui, Release
+        from pypi_cleanup_tui.tui import CleanupApp
+    except ImportError as error:
+        return f'import failed: {error}'
+    now = datetime.now(UTC)
+    cleanup = CleanupTui('smoke')
+    cleanup.versions = [
+        Release('1.0', now - timedelta(days=40)),
+        Release('1.1', now - timedelta(days=3)),
+    ]
+    cleanup.sort_versions(cleanup.sort)
+    app = CleanupApp(
+        cleanup,
+        backend=HeadlessBackend(rows=24, cols=80),
+        singleton=False,
+    )
+    try:
+        app._draw_current_screen()  # pylint: disable=protected-access
+        app.win.render()
+        rows = list(app.win.body.texts)
+        if not any('1.1' in row for row in rows):
+            return 'the table drew no release rows'
+        app.handle_key(ord('?'))
+        app.stack.perform_actions(app.spin)
+        app._draw_current_screen()  # pylint: disable=protected-access
+        app.win.render()
+        head = list(app.win.head.texts)
+        if not head or 'NavKeys:' not in head[0]:
+            return 'the help screen drew no navigation block'
+    except Exception as error:  # noqa: BLE001 - report it, never crash the gate
+        return f'{type(error).__name__}: {error}'
+    finally:
+        app.win.stop_curses()
+    return None
+
+
+def check_render() -> None:
+    """Run the headless render smoke and report its verdict."""
+    problem = render_smoke()
+    report('headless render', problem is None, problem or '')
+
+
+def check_pip(python: Path) -> None:
+    """Ask pip whether the installed environment meets the requirements."""
+    if run([python, '-m', 'pip', '--version']).returncode != 0:
+        report('pip check', None, 'pip is not installed for this interpreter')
+        return
+    result = run([python, '-m', 'pip', 'check'])
+    report('pip check', result.returncode == 0,
+           result.stdout + result.stderr)
+
+
+def check_pytest(python: Path) -> None:
+    """Run the suite when the checkout has one and pytest can run it."""
+    if not (ROOT / 'tests').is_dir():
+        report('pytest', None, 'no tests/ directory')
+        return
+    if run([python, '-m', 'pytest', '--version']).returncode != 0:
+        report('pytest', None, 'pytest is not installed for this interpreter')
+        return
+    result = run([python, '-m', 'pytest', '-q'])
+    report('pytest', result.returncode == 0, result.stdout + result.stderr)
+
+
+def main(argv: list[str]) -> int:
+    """Run the requested checks and return the process exit status."""
+    known = {'--fix', '--lint', '--no-smoke', '-h', '--help'}
+    unknown = [argument for argument in argv if argument not in known]
+    if '-h' in argv or '--help' in argv or unknown:
+        if unknown:
+            print(f'ruffit: unknown argument {unknown[0]!r}\n', file=sys.stderr)
+        print(__doc__.strip())
+        return 2 if unknown else 0
+
+    switch_interpreter(argv)
+    python = Path(sys.executable)
+    tool = ruff_tool(python)
+    print(f'ruffit: {ROOT} under {python}')
+    if tool is None:
+        report('ruff check', False,
+               f'no ruff for {python}; install it with '
+               f'{python} -m pip install ruff')
+        return 1
+
+    check_lint(tool, fix='--fix' in argv)
+    if '--lint' not in argv:
+        check_compile(python)
+        check_pyproject()
+        check_version(python)
+        if '--no-smoke' in argv:
+            report('headless render', None, '--no-smoke')
+        else:
+            check_render()
+        check_pip(python)
+        check_pytest(python)
+
+    print()
+    if _FAILED:
+        print('ruffit: FAIL')
+        return 1
+    print('ruffit: all checks passed')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv[1:]))
